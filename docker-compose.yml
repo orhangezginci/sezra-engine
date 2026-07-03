@@ -1,0 +1,11 @@
+services:
+  contracts-tests:
+    build:
+      context: .
+      dockerfile: docker/contracts-tests.Dockerfile
+    # Live-Mounts, damit Aenderungen an Schema/Tests ohne Rebuild
+    # sofort wirksam werden - CMD im Dockerfile bleibt der Fallback
+    # fuer den Fall, dass ohne Mount gebaut/ausgefuehrt wird.
+    volumes:
+      - ./contracts:/app/contracts:ro
+      - ./tests/contracts:/app/tests/contracts:ro

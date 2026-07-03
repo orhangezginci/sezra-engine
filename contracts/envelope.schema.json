@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sezra.dev/schemas/envelope.schema.json",
+  "title": "SEZRA Event Envelope",
+  "description": "Der universelle Vertrag, den JEDES Event in SEZRA-ENGINE erfüllen muss, unabhängig von event_type oder erzeugendem Service. Nur Felder, die für ausnahmslos jeden Event-Type gelten, sind hier erlaubt. Alles Fachliche/Event-Type-spezifische lebt im payload (siehe payload-conventions.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "source",
+    "occurred_at",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version dieses Envelope-Schemas (nicht des payload-Inhalts). Ermöglicht kontrolliertes Weiterentwickeln des Envelope-Vertrags, ohne bestehende Consumer zu brechen.",
+      "pattern": "^\\d+\\.\\d+$",
+      "examples": ["1.0"]
+    },
+    "event_id": {
+      "type": "string",
+      "description": "Eindeutige ID dieses konkreten Events. Von jedem Producer bei der Erzeugung neu vergeben.",
+      "format": "uuid"
+    },
+    "event_type": {
+      "type": "string",
+      "description": "Fachlicher Typ des Events, PascalCase, Vergangenheitsform bevorzugt (z. B. 'AnomalyDetected', 'InvestigationGenerated').",
+      "pattern": "^[A-Z][A-Za-z0-9]*$"
+    },
+    "source": {
+      "type": "string",
+      "description": "Name des Services, der dieses Event erzeugt hat (z. B. 'deviation-detector-service').",
+      "minLength": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "description": "UTC-Zeitpunkt, an dem DIESES Envelope erzeugt/publiziert wurde (nicht wann etwas in der realen Welt passiert ist - das gehört, falls relevant, als eigenes Feld in den payload).",
+      "format": "date-time"
+    },
+    "correlation_id": {
+      "type": ["string", "null"],
+      "description": "Verkettet alle Events, die zur selben fachlichen Kette gehören (z. B. eine Investigation von Anfang bis Ende). Optional, aber sobald vergeben, konsistent durchzureichen.",
+      "format": "uuid"
+    },
+    "causation_id": {
+      "type": ["string", "null"],
+      "description": "event_id des unmittelbaren Vorgänger-Events, das dieses Event ausgelöst hat. Optional - leer bei Events, die nicht durch ein anderes SEZRA-Event ausgelöst wurden (z. B. eine rohe externe Beobachtung).",
+      "format": "uuid"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-Type-spezifischer Inhalt. Frei erweiterbar. Konventionen fuer haeufige Felder (z. B. confidence, zeitliche Quellangaben) siehe payload-conventions.md.",
+      "additionalProperties": true
+    }
+  }
+}
