@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+
+# Virtuelle Umgebungen (falls doch mal lokal getestet wird)
+.venv/
+venv/
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Env-Dateien mit Secrets - niemals committen
+.env
+.env.*
+!.env.example
+
+# Docker
+docker-compose.override.yml
