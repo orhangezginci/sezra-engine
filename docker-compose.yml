@@ -9,3 +9,40 @@ services:
     volumes:
       - ./contracts:/app/contracts:ro
       - ./tests/contracts:/app/tests/contracts:ro
+
+  scaffold-tests:
+    build:
+      context: .
+      dockerfile: docker/scaffold-tests.Dockerfile
+    volumes:
+      - ./contracts:/app/contracts:ro
+      - ./scaffold/python-service/tests:/app/tests:ro
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "15672:15672"  # Management-UI, nur fuer lokale Entwicklung
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  json-adapter-service:
+    build:
+      context: .
+      dockerfile: services/json-adapter-service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      JSON_ADAPTER_INBOX_DIR: /data/json-inbox
+    volumes:
+      - ./data/json-inbox:/data/json-inbox
