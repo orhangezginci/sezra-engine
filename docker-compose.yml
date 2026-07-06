@@ -10,14 +10,6 @@ services:
       - ./contracts:/app/contracts:ro
       - ./tests/contracts:/app/tests/contracts:ro
 
-  scaffold-tests:
-    build:
-      context: .
-      dockerfile: docker/scaffold-tests.Dockerfile
-    volumes:
-      - ./contracts:/app/contracts:ro
-      - ./scaffold/python-service/tests:/app/tests:ro
-
   rabbitmq:
     image: rabbitmq:3.13-management
     environment:

@@ -23,3 +23,8 @@ venv/
 
 # Docker
 docker-compose.override.yml
+
+# Laufzeit-Daten des json-adapter-service - Struktur bleibt, Inhalte nicht
+data/json-inbox/*.json
+data/json-inbox/processed/
+data/json-inbox/failed/
