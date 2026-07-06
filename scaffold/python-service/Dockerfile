@@ -4,6 +4,12 @@
 
 FROM python:3.12-slim
 
+# Ohne das bleiben print()-Ausgaben im Python-internen Puffer haengen,
+# solange stdout nicht an ein Terminal geht (wie in Docker) - "docker
+# compose logs" zeigt dann scheinbar gar nichts, obwohl der Service
+# korrekt laeuft.
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY services/__SERVICE_NAME__/requirements.txt .
