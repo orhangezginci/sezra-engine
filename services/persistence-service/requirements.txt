@@ -1,0 +1,5 @@
+pika==1.3.*
+jsonschema[format]==4.*
+rfc3339-validator==0.1.*
+pytest==8.*
+psycopg2-binary==2.9.*
