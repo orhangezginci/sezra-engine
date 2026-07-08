@@ -4,7 +4,7 @@ ingestion-service
 Konsumiert von sezra.stream.raw (adapter-agnostisch - kennt und
 interessiert sich nicht dafuer, von welchem Adapter ein Envelope kam),
 validiert es gegen das Envelope-Schema und published es unveraendert
-zu sezra.stream.ingested.
+zu sezra.stream.validated.
 """
 
 import json
@@ -23,7 +23,7 @@ DEAD_LETTER_EXCHANGE = "sezra.stream.dead_letter"
 DEAD_LETTER_ROUTING_KEY = f"{SERVICE_NAME}.failed"
 
 INPUT_EXCHANGE = "sezra.stream.raw"
-OUTPUT_EXCHANGE = "sezra.stream.ingested"
+OUTPUT_EXCHANGE = "sezra.stream.validated"
 QUEUE_NAME = f"sezra.queue.{SERVICE_NAME}"
 
 
@@ -82,7 +82,7 @@ def publish_dead_letter(channel, original_body: bytes, reason: str, failure_clas
     print(f"[{SERVICE_NAME}] Published dead-letter event (class={failure_class}): {reason}")
 
 
-def publish_ingested(channel, envelope: dict) -> None:
+def publish_validated(channel, envelope: dict) -> None:
     channel.basic_publish(
         exchange=OUTPUT_EXCHANGE,
         routing_key="",
@@ -111,7 +111,7 @@ def handle_message(channel, method, properties, body: bytes) -> None:
         channel.basic_ack(delivery_tag=method.delivery_tag)
         return
 
-    publish_ingested(channel, envelope)
+    publish_validated(channel, envelope)
     print(
         f"[{SERVICE_NAME}] Ingested {envelope['event_type']} "
         f"({envelope['event_id']}) from {envelope['source']}"
