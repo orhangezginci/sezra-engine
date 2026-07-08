@@ -175,3 +175,38 @@ class TestTopLevelStrictness:
 
         with pytest.raises(ValidationError):
             validator.validate(event)
+
+
+class TestProjectId:
+    """
+    project_id isoliert Daten unterschiedlicher Einsatzszenarien/
+    Mandanten (z. B. beim Vektorisieren in Qdrant). Optional, damit
+    aeltere Envelopes (schema_version 1.0) weiterhin gueltig bleiben.
+    """
+
+    def test_event_without_project_id_is_still_valid(
+        self, validator, minimal_valid_event
+    ):
+        # minimal_valid_event enthaelt bewusst kein project_id
+        validator.validate(minimal_valid_event)
+
+    def test_valid_project_id_is_accepted(self, validator, minimal_valid_event):
+        event = deepcopy(minimal_valid_event)
+        event["project_id"] = "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
+
+        validator.validate(event)
+
+    def test_null_project_id_is_valid(self, validator, minimal_valid_event):
+        event = deepcopy(minimal_valid_event)
+        event["project_id"] = None
+
+        validator.validate(event)
+
+    def test_invalid_project_id_format_is_rejected(
+        self, validator, minimal_valid_event
+    ):
+        event = deepcopy(minimal_valid_event)
+        event["project_id"] = "not-a-uuid"
+
+        with pytest.raises(ValidationError):
+            validator.validate(event)

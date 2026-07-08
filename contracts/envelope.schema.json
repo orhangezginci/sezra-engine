@@ -18,7 +18,7 @@
       "type": "string",
       "description": "Version dieses Envelope-Schemas (nicht des payload-Inhalts). Ermöglicht kontrolliertes Weiterentwickeln des Envelope-Vertrags, ohne bestehende Consumer zu brechen.",
       "pattern": "^\\d+\\.\\d+$",
-      "examples": ["1.0"]
+      "examples": ["1.0", "1.1"]
     },
     "event_id": {
       "type": "string",
@@ -48,6 +48,11 @@
     "causation_id": {
       "type": ["string", "null"],
       "description": "event_id des unmittelbaren Vorgänger-Events, das dieses Event ausgelöst hat. Optional - leer bei Events, die nicht durch ein anderes SEZRA-Event ausgelöst wurden (z. B. eine rohe externe Beobachtung).",
+      "format": "uuid"
+    },
+    "project_id": {
+      "type": ["string", "null"],
+      "description": "Isoliert Daten unterschiedlicher Einsatzszenarien/Mandanten voneinander (z. B. beim Vektorisieren/Suchen in Qdrant), damit unaehnliche Domaenen nie faelschlich als semantisch aehnlich behandelt werden. Wird vom erzeugenden Adapter gesetzt und danach additiv durchgereicht, nie von nachgelagerten Services interpretiert oder veraendert. Optional, weil aeltere Envelopes (schema_version 1.0) es nicht kennen.",
       "format": "uuid"
     },
     "payload": {
