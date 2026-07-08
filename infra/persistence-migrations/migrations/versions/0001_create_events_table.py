@@ -21,7 +21,8 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.create_table(
         "events",
-        sa.Column("event_id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("event_id", postgresql.UUID(as_uuid=True), nullable=False, unique=True),
         sa.Column("schema_version", sa.Text(), nullable=False),
         sa.Column("event_type", sa.Text(), nullable=False),
         sa.Column("source", sa.Text(), nullable=False),
