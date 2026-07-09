@@ -52,6 +52,10 @@ services:
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       JSON_ADAPTER_INBOX_DIR: /data/json-inbox
+      # Hart verdrahtet pro Adapter-Instanz (siehe Diskussion zu
+      # project_id im Envelope) - kein dynamisches Projekt-Konzept,
+      # noch keine project-service-API.
+      SEZRA_PROJECT_ID: ${SEZRA_PROJECT_ID}
     volumes:
       - ./data/json-inbox:/data/json-inbox
 

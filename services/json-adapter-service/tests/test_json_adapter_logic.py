@@ -24,6 +24,7 @@ os.environ["RABBITMQ_HOST"] = "localhost"
 os.environ["RABBITMQ_PORT"] = "5672"
 os.environ["RABBITMQ_USER"] = "test"
 os.environ["RABBITMQ_PASSWORD"] = "test"
+os.environ["SEZRA_PROJECT_ID"] = "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
 
 from main import build_envelope, derive_event_type  # noqa: E402
 
@@ -47,11 +48,17 @@ class TestBuildEnvelope:
         raw = {"source_type": "observation", "metric": "math_test_average", "value": 78}
         envelope = build_envelope(raw)
 
-        assert envelope["schema_version"] == "1.0"
+        assert envelope["schema_version"] == "1.1"
         assert envelope["event_type"] == "ObservationIngested"
         assert envelope["source"] == "json-adapter-service"
         assert "event_id" in envelope
         assert "occurred_at" in envelope
+
+    def test_envelope_contains_project_id_from_environment(self):
+        raw = {"source_type": "observation", "value": 1}
+        envelope = build_envelope(raw)
+
+        assert envelope["project_id"] == "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
 
     def test_raw_data_is_preserved_unchanged_in_payload(self):
         raw = {"source_type": "context", "sender": "principal@school.org", "text": "..."}

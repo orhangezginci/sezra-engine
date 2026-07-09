@@ -51,6 +51,11 @@ RABBITMQ_PORT = int(required_env("RABBITMQ_PORT"))
 RABBITMQ_USER = required_env("RABBITMQ_USER")
 RABBITMQ_PASSWORD = required_env("RABBITMQ_PASSWORD")
 
+# Mandatory, nicht optional: ohne feste Projekt-Zuordnung pro
+# Adapter-Instanz landen Daten unterschiedlicher Einsatzszenarien
+# vermischt in der Pipeline (siehe project_id im Envelope-Schema).
+SEZRA_PROJECT_ID = required_env("SEZRA_PROJECT_ID")
+
 
 def connect_to_rabbitmq() -> pika.BlockingConnection:
     credentials = pika.PlainCredentials(
@@ -101,11 +106,12 @@ def derive_event_type(raw_data: dict) -> str:
 
 def build_envelope(raw_data: dict) -> dict:
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "event_id": str(uuid4()),
         "event_type": derive_event_type(raw_data),
         "source": SERVICE_NAME,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "project_id": SEZRA_PROJECT_ID,
         "payload": raw_data,
     }
 

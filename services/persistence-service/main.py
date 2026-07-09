@@ -111,9 +111,9 @@ def publish_dead_letter(channel, original_body: bytes, reason: str, failure_clas
 INSERT_EVENT_SQL = """
     INSERT INTO events (
         id, event_id, schema_version, event_type, source,
-        occurred_at, correlation_id, causation_id, payload
+        occurred_at, correlation_id, causation_id, project_id, payload
     )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (event_id) DO NOTHING
 """
 
@@ -138,6 +138,7 @@ def insert_event(db_connection, envelope: dict) -> bool:
                 envelope["occurred_at"],
                 envelope.get("correlation_id"),
                 envelope.get("causation_id"),
+                envelope.get("project_id"),
                 json.dumps(envelope["payload"]),
             ),
         )

@@ -100,15 +100,27 @@ class TestInsertEvent:
 
     def test_missing_optional_fields_default_to_none(self):
         db = FakeDBConnection(rowcount=1)
-        envelope = dict(VALID_ENVELOPE)  # keine correlation_id/causation_id
+        envelope = dict(VALID_ENVELOPE)  # keine correlation_id/causation_id/project_id
 
         insert_event(db, envelope)
 
         params = db._cursor.executed[0]["params"]
         # Reihenfolge lt. INSERT_EVENT_SQL: id, event_id, schema_version,
-        # event_type, source, occurred_at, correlation_id, causation_id, payload
+        # event_type, source, occurred_at, correlation_id, causation_id,
+        # project_id, payload
         assert params[6] is None  # correlation_id
         assert params[7] is None  # causation_id
+        assert params[8] is None  # project_id
+
+    def test_project_id_is_passed_through_when_present(self):
+        db = FakeDBConnection(rowcount=1)
+        envelope = dict(VALID_ENVELOPE)
+        envelope["project_id"] = "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
+
+        insert_event(db, envelope)
+
+        params = db._cursor.executed[0]["params"]
+        assert params[8] == "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
 
     def test_payload_is_serialized_as_json(self):
         db = FakeDBConnection(rowcount=1)
@@ -116,7 +128,7 @@ class TestInsertEvent:
         insert_event(db, VALID_ENVELOPE)
 
         params = db._cursor.executed[0]["params"]
-        assert json.loads(params[8]) == VALID_ENVELOPE["payload"]
+        assert json.loads(params[9]) == VALID_ENVELOPE["payload"]
 
 
 class TestHandleMessageValidEnvelope:
