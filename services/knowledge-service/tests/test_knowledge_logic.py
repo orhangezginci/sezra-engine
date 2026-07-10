@@ -111,6 +111,26 @@ class TestCreateEnrichedEvent:
 
         assert enriched["correlation_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
+    def test_project_id_is_passed_through(self):
+        """
+        Regressionstest: create_enriched_event baut ein komplett neues
+        Envelope-Dict statt das Original zu erweitern - project_id wurde
+        dabei urspruenglich schlicht vergessen (gefunden beim ersten
+        vollstaendigen End-to-End-Test, project_id kam als null in
+        Qdrant an, obwohl json-adapter-service es korrekt gesetzt hatte).
+        """
+        envelope = dict(VALID_ENVELOPE)
+        envelope["project_id"] = "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
+
+        enriched = create_enriched_event(envelope, "text")
+
+        assert enriched["project_id"] == "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
+
+    def test_missing_project_id_defaults_to_none(self):
+        enriched = create_enriched_event(VALID_ENVELOPE, "text")
+
+        assert enriched["project_id"] is None
+
     def test_event_type_is_semantic_enrichment_generated(self):
         enriched = create_enriched_event(VALID_ENVELOPE, "text")
 

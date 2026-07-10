@@ -83,13 +83,14 @@ def create_enriched_event(original_envelope: dict, semantic_text: str) -> dict:
     original_event_id = original_envelope["event_id"]
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "event_id": str(uuid4()),
         "event_type": "SemanticEnrichmentGenerated",
         "source": SERVICE_NAME,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         "correlation_id": original_envelope.get("correlation_id") or original_event_id,
         "causation_id": original_event_id,
+        "project_id": original_envelope.get("project_id"),
         "payload": {
             **original_envelope["payload"],
             "semantic_text": semantic_text,
