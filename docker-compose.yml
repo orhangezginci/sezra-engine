@@ -63,6 +63,18 @@ services:
       OLLAMA_PORT: 11434
       OLLAMA_EMBEDDING_MODEL: nomic-embed-text
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"  # REST-API, nur fuer lokale Entwicklung/Debugging
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   json-adapter-service:
     build:
       context: .
@@ -146,3 +158,4 @@ services:
 volumes:
   postgres-data:
   ollama-data:
+  qdrant-data:
