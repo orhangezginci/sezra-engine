@@ -177,6 +177,22 @@ services:
       OLLAMA_PORT: 11434
       OLLAMA_EMBEDDING_MODEL: nomic-embed-text
 
+  deviation-detector-service:
+    build:
+      context: .
+      dockerfile: services/deviation-detector-service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      DETECTOR_MIN_HISTORY_SIZE: 5
+      DETECTOR_MAX_HISTORY_SIZE: 100
+      DETECTOR_STDDEV_MULTIPLIER: 2.0
+
 volumes:
   postgres-data:
   ollama-data:
