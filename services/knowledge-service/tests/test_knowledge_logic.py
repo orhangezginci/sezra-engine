@@ -131,6 +131,18 @@ class TestCreateEnrichedEvent:
 
         assert enriched["project_id"] is None
 
+    def test_source_occurred_at_carries_original_timestamp(self):
+        """
+        occurred_at im Envelope selbst bleibt knowledge-service's eigene
+        Erzeugungszeit (schema-konform) - der urspruengliche Zeitpunkt
+        wandert stattdessen als source_occurred_at ins Payload, damit
+        der spaetere Analyzer zeitliche Kausalitaet pruefen kann.
+        """
+        enriched = create_enriched_event(VALID_ENVELOPE, "text")
+
+        assert enriched["payload"]["source_occurred_at"] == VALID_ENVELOPE["occurred_at"]
+        assert enriched["occurred_at"] != VALID_ENVELOPE["occurred_at"]
+
     def test_event_type_is_semantic_enrichment_generated(self):
         enriched = create_enriched_event(VALID_ENVELOPE, "text")
 

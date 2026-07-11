@@ -62,7 +62,12 @@ VALID_ENVELOPE = {
     "source": "knowledge-service",
     "occurred_at": "2026-07-05T10:00:00Z",
     "project_id": "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a",
-    "payload": {"metric": "test", "value": 42, "semantic_text": "metric: test; value: 42"},
+    "payload": {
+        "metric": "test",
+        "value": 42,
+        "semantic_text": "metric: test; value: 42",
+        "source_occurred_at": "2026-07-05T09:58:00Z",
+    },
 }
 
 FAKE_VECTOR = [0.1] * 768
@@ -122,7 +127,18 @@ class TestWriteToQdrant:
         assert point.vector == FAKE_VECTOR
         assert point.payload["event_id"] == VALID_ENVELOPE["event_id"]
         assert point.payload["project_id"] == VALID_ENVELOPE["project_id"]
+        assert point.payload["occurred_at"] == "2026-07-05T09:58:00Z"  # source_occurred_at, nicht envelope occurred_at
         assert point.payload["semantic_text"] == "metric: test; value: 42"
+
+    def test_falls_back_to_envelope_occurred_at_when_source_occurred_at_missing(self):
+        client = MagicMock()
+        envelope = dict(VALID_ENVELOPE)
+        envelope["payload"] = {"metric": "test", "value": 42, "semantic_text": "text"}
+
+        write_to_qdrant(client, envelope, FAKE_VECTOR)
+
+        point = client.upsert.call_args.kwargs["points"][0]
+        assert point.payload["occurred_at"] == VALID_ENVELOPE["occurred_at"]
 
 
 class TestHandleMessage:

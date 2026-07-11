@@ -124,6 +124,14 @@ def write_to_qdrant(qdrant_client: QdrantClient, envelope: dict, vector: list[fl
                     "project_id": envelope.get("project_id"),
                     "event_type": envelope["event_type"],
                     "source": envelope["source"],
+                    # source_occurred_at (payload-Konvention, siehe
+                    # payload-conventions.md) ist der Zeitpunkt des
+                    # urspruenglichen Envelopes, durchgereicht von
+                    # knowledge-service - das braucht der Analyzer fuer
+                    # die zeitliche Kausalitaets-Pruefung. Fallback auf
+                    # envelope["occurred_at"], falls das Feld fehlt
+                    # (z. B. bei aelteren Envelopes ohne diese Konvention).
+                    "occurred_at": payload.get("source_occurred_at", envelope["occurred_at"]),
                     "semantic_text": payload.get("semantic_text"),
                 },
             )

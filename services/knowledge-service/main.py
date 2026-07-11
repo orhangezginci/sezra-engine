@@ -96,6 +96,13 @@ def create_enriched_event(original_envelope: dict, semantic_text: str) -> dict:
             "semantic_text": semantic_text,
             "source_event_id": original_event_id,
             "source_event_type": original_envelope["event_type"],
+            # Payload-Konvention (siehe payload-conventions.md), nicht
+            # Envelope-Feld: occurred_at oben ist bewusst DIESES Envelopes
+            # eigene Erzeugungszeit (schema-konform). source_occurred_at
+            # traegt den Zeitpunkt des urspruenglichen Envelopes durch -
+            # das braucht der spaetere Analyzer fuer die zeitliche
+            # Kausalitaets-Pruefung (Ursache muss vor der Anomalie liegen).
+            "source_occurred_at": original_envelope["occurred_at"],
         },
     }
 
