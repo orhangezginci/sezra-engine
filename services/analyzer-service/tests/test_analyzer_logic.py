@@ -24,6 +24,7 @@ os.environ["QDRANT_PORT"] = "6333"
 os.environ["OLLAMA_HOST"] = "localhost"
 os.environ["OLLAMA_PORT"] = "11434"
 os.environ["OLLAMA_EMBEDDING_MODEL"] = "nomic-embed-text"
+os.environ["OLLAMA_GENERATION_MODEL"] = "qwen2.5:1.5b"
 os.environ["ANALYZER_CONFIDENCE_THRESHOLD"] = "0.5"
 
 import pytest  # noqa: E402
@@ -36,6 +37,7 @@ from main import (  # noqa: E402
     build_investigation_payload,
     create_embedding,
     create_investigation_event,
+    generate_causal_explanation,
     handle_message,
     search_related_context,
 )
@@ -256,8 +258,51 @@ class TestSearchRelatedContext:
         assert results[0]["source_event_id"] == "b"
 
 
+class TestGenerateCausalExplanation:
+    def test_returns_generated_text(self, monkeypatch):
+        fake_response = MagicMock()
+        fake_response.json.return_value = {"response": "  Der frühere Beginn könnte zu weniger Schlaf geführt haben.  "}
+        fake_response.raise_for_status.return_value = None
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+
+        result = generate_causal_explanation("math_test_average dropped", REKTOR_MAIL_TEXT)
+
+        assert result == "Der frühere Beginn könnte zu weniger Schlaf geführt haben."
+
+    def test_uses_generate_endpoint_not_embeddings(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, json, timeout):
+            captured["url"] = url
+            response = MagicMock()
+            response.json.return_value = {"response": "text"}
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        generate_causal_explanation("summary", "cause")
+
+        assert "/api/generate" in captured["url"]
+
+    def test_returns_none_on_failure_instead_of_raising(self, monkeypatch):
+        def raise_error(*args, **kwargs):
+            raise requests.ConnectionError("Ollama unreachable")
+
+        monkeypatch.setattr(requests, "post", raise_error)
+
+        result = generate_causal_explanation("summary", "cause")
+
+        assert result is None
+
+
 class TestBuildInvestigationPayload:
-    def test_confident_candidate_is_included(self):
+    def test_confident_candidate_is_included(self, monkeypatch):
+        fake_response = MagicMock()
+        fake_response.json.return_value = {"response": "generated explanation"}
+        fake_response.raise_for_status.return_value = None
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+
         candidates = [
             {
                 "semantic_text": REKTOR_MAIL_TEXT,
@@ -272,6 +317,51 @@ class TestBuildInvestigationPayload:
 
         assert len(result["possible_causes"]) == 1
         assert result["possible_causes"][0]["confidence"] == 0.87
+
+    def test_confident_candidate_gets_an_explanation(self, monkeypatch):
+        fake_response = MagicMock()
+        fake_response.json.return_value = {"response": "generated explanation"}
+        fake_response.raise_for_status.return_value = None
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+
+        candidates = [
+            {
+                "semantic_text": REKTOR_MAIL_TEXT,
+                "confidence": 0.87,
+                "source_event_id": "ctx-1",
+                "occurred_at": "2026-07-04T06:00:00Z",
+                "occurred_before_anomaly": True,
+            }
+        ]
+
+        result = build_investigation_payload(ANOMALY_ENVELOPE, candidates)
+
+        assert result["possible_causes"][0]["explanation"] == "generated explanation"
+
+    def test_explanation_failure_does_not_break_the_investigation(self, monkeypatch):
+        """
+        Wenn die Generierung fehlschlaegt, bleibt die Investigation
+        trotzdem nutzbar - explanation ist dann None, kein Absturz.
+        """
+        def raise_error(*args, **kwargs):
+            raise requests.ConnectionError("Ollama unreachable")
+
+        monkeypatch.setattr(requests, "post", raise_error)
+
+        candidates = [
+            {
+                "semantic_text": REKTOR_MAIL_TEXT,
+                "confidence": 0.87,
+                "source_event_id": "ctx-1",
+                "occurred_at": "2026-07-04T06:00:00Z",
+                "occurred_before_anomaly": True,
+            }
+        ]
+
+        result = build_investigation_payload(ANOMALY_ENVELOPE, candidates)
+
+        assert len(result["possible_causes"]) == 1
+        assert result["possible_causes"][0]["explanation"] is None
 
     def test_low_confidence_candidate_triggers_fallback(self):
         """

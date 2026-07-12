@@ -66,6 +66,7 @@ QDRANT_PORT = int(required_env("QDRANT_PORT"))
 OLLAMA_HOST = required_env("OLLAMA_HOST")
 OLLAMA_PORT = required_env("OLLAMA_PORT")
 OLLAMA_EMBEDDING_MODEL = required_env("OLLAMA_EMBEDDING_MODEL")
+OLLAMA_GENERATION_MODEL = required_env("OLLAMA_GENERATION_MODEL")
 
 
 def connect_to_rabbitmq() -> pika.BlockingConnection:
@@ -135,6 +136,58 @@ def create_embedding(text: str) -> list[float]:
     )
     response.raise_for_status()
     return response.json()["embedding"]
+
+
+def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | None:
+    """
+    Nutzt ein generatives Modell (nicht das Embedding-Modell), um in
+    eigenen Worten zu erklaeren, WIE der gefundene Kontext zur Anomalie
+    gefuehrt haben koennte - Ergaenzung zum rohen semantic_text, nicht
+    Ersatz dafuer (Transparenz/Nachvollziehbarkeit bleibt erhalten).
+
+    Bewusst vorsichtig formuliert im Prompt: keine Tatsachenbehauptung,
+    da es sich weiterhin nur um eine semantische Korrelation handelt,
+    keine bewiesene Kausalitaet (siehe confidence_note).
+
+    Gibt None zurueck statt zu werfen, wenn die Generierung fehlschlaegt -
+    die Investigation soll trotzdem mit dem rohen semantic_text nutzbar
+    bleiben, auch ohne generierte Erklaerung.
+    """
+    prompt = (
+        f"Beobachtete Anomalie: {anomaly_summary}\n"
+        f"Moeglicher Ausloeser: \"{cause_text}\"\n\n"
+        "Erklaere in GENAU EINEM vollstaendigen Satz auf Deutsch die "
+        "Wirkungskette: WARUM koennte dieser Ausloeser konkret zu GENAU "
+        "DIESER Anomalie gefuehrt haben? Nenne einen plausiblen "
+        "Zwischenschritt (z. B. Auswirkung auf Konzentration, Zeit, "
+        "Ressourcen). Nutze \"koennte\" oder \"moeglicherweise\". Nur der "
+        "eine Satz, keine Wiederholung der Eingabe."
+    )
+
+    try:
+        response = requests.post(
+            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            json={
+                "model": OLLAMA_GENERATION_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    # Niedrige temperature gegen thematisches Abschweifen,
+                    # num_predict begrenzt die Antwortlaenge hart, statt
+                    # nur per Prompt-Anweisung ("ein Satz") zu hoffen, dass
+                    # das Modell sich daran haelt - qwen2.5:1.5b ignoriert
+                    # Laengenvorgaben im Prompt sonst zuverlaessig.
+                    "temperature": 0.3,
+                    "num_predict": 150,
+                },
+            },
+            timeout=180,
+        )
+        response.raise_for_status()
+        return response.json()["response"].strip()
+    except (requests.RequestException, KeyError, ValueError) as error:
+        print(f"[{SERVICE_NAME}] Explanation generation failed, continuing without it: {error}")
+        return None
 
 
 def search_related_context(
@@ -222,6 +275,15 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
                 "context exists in the available data."
             ),
         }
+
+    # Nur fuer bereits bestaetigte (ueber dem Threshold liegende) Kandidaten
+    # eine Erklaerung generieren - spart Rechenzeit und vermeidet, dass das
+    # Modell plausibel klingende Geschichten zu eigentlich verworfenen,
+    # schwachen Treffern erfindet.
+    for candidate in confident_candidates:
+        candidate["explanation"] = generate_causal_explanation(
+            anomaly_summary, candidate["semantic_text"]
+        )
 
     return {
         "anomaly_summary": anomaly_summary,

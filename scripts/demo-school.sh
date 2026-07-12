@@ -14,7 +14,7 @@ set -e
 API_URL="http://localhost:8000"
 RABBITMQ_MGMT_URL="http://localhost:15672"
 POLL_INTERVAL_SECONDS=3
-POLL_TIMEOUT_SECONDS=60
+POLL_TIMEOUT_SECONDS=210
 STACK_READY_TIMEOUT_SECONDS=180
 CONSUMER_READY_TIMEOUT_SECONDS=60
 
@@ -57,8 +57,11 @@ fi
 echo "=== SEZRA Demo: School Scenario ==="
 echo ""
 
-echo "0/4 Stack wird sauber neu gestartet (down -v + up --build)..."
-docker compose down -v > /dev/null 2>&1 || true
+echo "0/4 Stack wird neu gestartet (down + up --build)..."
+echo "    Hinweis: das ollama-data-Volume bleibt erhalten, damit die"
+echo "    Sprachmodelle nicht bei jedem Lauf neu heruntergeladen werden"
+echo "    muessen. Postgres/Qdrant werden stattdessen gezielt geleert."
+docker compose down > /dev/null 2>&1 || true
 docker compose up --build -d $STACK_SERVICES
 
 echo "Warte, bis alle Services bereit sind (bis zu ${STACK_READY_TIMEOUT_SECONDS}s)..."
@@ -152,6 +155,19 @@ for i in $(seq 1 20); do
 done
 
 echo "Stack ist bereit."
+echo ""
+
+echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
+docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
+  -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
+
+# Leerer Filter matcht alle Punkte - loescht den Inhalt, ohne die
+# Collection selbst zu entfernen (vectorizing-service hat sie beim
+# eigenen Start bereits angelegt und geht davon aus, dass sie besteht).
+curl -s -X POST "http://localhost:6333/collections/sezra_semantic/points/delete" \
+  -H "Content-Type: application/json" \
+  -d '{"filter": {}}' > /dev/null 2>&1 || true
+
 echo ""
 
 echo "1/3 Rektor-Mail (Kontext) wird per POST eingereicht..."
