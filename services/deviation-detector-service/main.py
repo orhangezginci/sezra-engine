@@ -181,6 +181,14 @@ def create_anomaly_event(
             "change_amount": change_amount,
             "reason": reason,
             "source_event_id": source_event_id,
+            # Payload-Konvention wie in knowledge-service: occurred_at
+            # oben ist dieses Envelopes eigene Erzeugungszeit. Das
+            # konsumierte Envelope kommt unveraendert von
+            # ingestion-service durch, also ist envelope["occurred_at"]
+            # hier tatsaechlich die echte Adapter-Erfassungszeit - der
+            # spaetere Analyzer braucht sie fuer die zeitliche
+            # Kausalitaets-Pruefung.
+            "source_occurred_at": envelope["occurred_at"],
         },
     }
 

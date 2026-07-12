@@ -171,6 +171,19 @@ class TestCreateAnomalyEvent:
 
         assert event["payload"]["composite_key"] == "math_test_average|grade_level=8"
 
+    def test_source_occurred_at_carries_original_observation_timestamp(self):
+        """
+        occurred_at im Envelope selbst bleibt deviation-detector-service's
+        eigene Erzeugungszeit - der Zeitpunkt der urspruenglichen
+        Beobachtung (die der Detector unveraendert von ingestion-service
+        erhaelt) wandert als payload.source_occurred_at durch, damit der
+        Analyzer spaeter zeitliche Kausalitaet pruefen kann.
+        """
+        envelope = make_grade_envelope(grade_level=8, value=62)
+        event = create_anomaly_event(envelope, "key", 78, 62, DeviationType.DROP)
+
+        assert event["payload"]["source_occurred_at"] == envelope["occurred_at"]
+
 
 class TestHandleMessageWithGradeScenario:
     def setup_method(self):
