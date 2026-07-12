@@ -27,6 +27,7 @@ import pika
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from envelope_validation import InvalidEnvelopeError, validate_envelope
@@ -134,6 +135,19 @@ def ingest(raw_data: dict, source_type: str) -> dict:
 
 
 app = FastAPI(title="SEZRA-ENGINE API", version="1.0")
+
+# CORS: erlaubt einem lokalen Experiment (z. B. eine index.html, die man
+# direkt im Browser oeffnet oder ueber einen simplen Static-Server
+# ausliefert) den Zugriff auf diese API. Bewusst offen (allow_origins=["*"])
+# fuer dieses Entwicklungsstadium - keine Authentifizierung, kein
+# Produktivbetrieb. Muesste vor einem echten Deployment eingeschraenkt
+# werden.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/observations")
