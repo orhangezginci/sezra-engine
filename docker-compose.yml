@@ -217,6 +217,31 @@ services:
       ANALYZER_SEARCH_LIMIT: 5
       ANALYZER_CONFIDENCE_THRESHOLD: 0.5
 
+  api-service:
+    build:
+      context: .
+      dockerfile: services/api-service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      persistence-migrations:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      SEZRA_PROJECT_ID: ${SEZRA_PROJECT_ID}
+
 volumes:
   postgres-data:
   ollama-data:
