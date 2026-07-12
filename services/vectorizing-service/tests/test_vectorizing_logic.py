@@ -32,9 +32,11 @@ import main  # noqa: E402
 from main import (  # noqa: E402
     DEAD_LETTER_EXCHANGE,
     QDRANT_COLLECTION_NAME,
+    build_composite_key,
     create_embedding,
     ensure_qdrant_collection,
     handle_message,
+    is_observation,
     write_to_qdrant,
 )
 
@@ -84,6 +86,26 @@ class TestCreateEmbedding:
 
         assert vector == FAKE_VECTOR
 
+    def test_prepends_search_document_prefix(self, monkeypatch):
+        """
+        nomic-embed-text erwartet dieses Task-Prefix fuer zu speichernde
+        Texte, unterschieden von search_query fuer Suchanfragen.
+        """
+        captured = {}
+
+        def fake_post(url, json, timeout):
+            captured["prompt"] = json["prompt"]
+            response = MagicMock()
+            response.json.return_value = {"embedding": FAKE_VECTOR}
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        create_embedding("some text")
+
+        assert captured["prompt"] == "search_document: some text"
+
     def test_raises_on_ollama_http_error(self, monkeypatch):
         fake_response = MagicMock()
         fake_response.raise_for_status.side_effect = requests.HTTPError("500")
@@ -114,6 +136,39 @@ class TestEnsureQdrantCollection:
         client.create_collection.assert_not_called()
 
 
+class TestIsObservation:
+    def test_metric_and_value_present_is_observation(self):
+        assert is_observation({"metric": "x", "value": 1}) is True
+
+    def test_context_payload_is_not_observation(self):
+        assert is_observation({"sender": "rektor@schule.de", "text": "..."}) is False
+
+
+class TestBuildCompositeKey:
+    def test_matches_deviation_detector_service_for_same_raw_fields(self):
+        """
+        Kritischer Konsistenz-Test: der composite_key MUSS identisch mit
+        dem im deviation-detector-service berechneten sein, sonst kann
+        der Analyzer eine Beobachtungsreihe nie korrekt von sich selbst
+        als Ursachenkandidat ausschliessen. Simuliert hier den Aufruf mit
+        dem ANGEREICHERTEN Payload (wie vectorizing-service ihn bekommt),
+        muss aber trotzdem denselben Key wie aus dem ROHEN Payload liefern.
+        """
+        raw_payload = {"source_type": "observation", "metric": "math_test_average", "period": 1, "value": 79}
+        enriched_payload = {
+            **raw_payload,
+            "semantic_text": "some text",
+            "source_event_id": "unique-per-event-id",
+            "source_event_type": "ObservationIngested",
+            "source_occurred_at": "2026-07-11T08:00:00Z",
+        }
+
+        assert build_composite_key(enriched_payload) == build_composite_key(raw_payload)
+
+    def test_metric_alone_when_no_other_dimensions(self):
+        assert build_composite_key({"metric": "simple_metric", "value": 1}) == "simple_metric"
+
+
 class TestWriteToQdrant:
     def test_upserts_point_with_metadata(self):
         client = MagicMock()
@@ -129,6 +184,28 @@ class TestWriteToQdrant:
         assert point.payload["project_id"] == VALID_ENVELOPE["project_id"]
         assert point.payload["occurred_at"] == "2026-07-05T09:58:00Z"  # source_occurred_at, nicht envelope occurred_at
         assert point.payload["semantic_text"] == "metric: test; value: 42"
+
+    def test_composite_key_is_included_for_observations(self):
+        client = MagicMock()
+
+        write_to_qdrant(client, VALID_ENVELOPE, FAKE_VECTOR)
+
+        point = client.upsert.call_args.kwargs["points"][0]
+        assert point.payload["composite_key"] == "test"
+
+    def test_composite_key_is_none_for_context_events(self):
+        client = MagicMock()
+        envelope = dict(VALID_ENVELOPE)
+        envelope["payload"] = {
+            "sender": "rektor@schule.de",
+            "text": "...",
+            "semantic_text": "sender: rektor@schule.de; text: ...",
+        }
+
+        write_to_qdrant(client, envelope, FAKE_VECTOR)
+
+        point = client.upsert.call_args.kwargs["points"][0]
+        assert point.payload["composite_key"] is None
 
     def test_falls_back_to_envelope_occurred_at_when_source_occurred_at_missing(self):
         client = MagicMock()

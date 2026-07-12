@@ -1,8 +1,12 @@
 """
 persistence-service
 
-Konsumiert von sezra.stream.validated, schreibt jedes gueltige Envelope
-als Zeile in die events-Tabelle (PostgreSQL).
+Konsumiert von sezra.stream.validated UND sezra.stream.investigation,
+schreibt jedes gueltige Envelope als Zeile in die events-Tabelle
+(PostgreSQL). Additive Knowledge-Kette: Investigation-Ergebnisse werden
+genauso persistiert wie die urspruenglichen Beobachtungen, beide bleiben
+nebeneinander bestehen (schema-loses payload/JSONB macht das moeglich,
+ohne die Tabellenstruktur je Event-Type anzupassen).
 
 Reiner Consumer: kein Publish zu irgendeiner Exchange. Die einzige
 bewusste Ausnahme vom "immer nur Exchange-zu-Exchange"-Prinzip ist das
@@ -26,7 +30,7 @@ SERVICE_NAME = "persistence-service"
 DEAD_LETTER_EXCHANGE = "sezra.stream.dead_letter"
 DEAD_LETTER_ROUTING_KEY = f"{SERVICE_NAME}.failed"
 
-INPUT_EXCHANGE = "sezra.stream.validated"
+INPUT_EXCHANGES = ["sezra.stream.validated", "sezra.stream.investigation"]
 QUEUE_NAME = f"sezra.queue.{SERVICE_NAME}"
 
 
@@ -187,13 +191,14 @@ def main() -> None:
     connection = connect_to_rabbitmq()
     channel = connection.channel()
 
-    channel.exchange_declare(exchange=INPUT_EXCHANGE, exchange_type="fanout", durable=True)
     channel.exchange_declare(exchange=DEAD_LETTER_EXCHANGE, exchange_type="fanout", durable=True)
-
     channel.queue_declare(queue=QUEUE_NAME, durable=True)
-    channel.queue_bind(exchange=INPUT_EXCHANGE, queue=QUEUE_NAME)
 
-    print(f"[{SERVICE_NAME}] listening on queue: {QUEUE_NAME}")
+    for exchange in INPUT_EXCHANGES:
+        channel.exchange_declare(exchange=exchange, exchange_type="fanout", durable=True)
+        channel.queue_bind(exchange=exchange, queue=QUEUE_NAME)
+
+    print(f"[{SERVICE_NAME}] listening on queue: {QUEUE_NAME} (exchanges: {INPUT_EXCHANGES})")
 
     channel.basic_consume(
         queue=QUEUE_NAME,

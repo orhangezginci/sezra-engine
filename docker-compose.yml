@@ -193,6 +193,30 @@ services:
       DETECTOR_MAX_HISTORY_SIZE: 100
       DETECTOR_STDDEV_MULTIPLIER: 2.0
 
+  analyzer-service:
+    build:
+      context: .
+      dockerfile: services/analyzer-service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      OLLAMA_HOST: ollama
+      OLLAMA_PORT: 11434
+      OLLAMA_EMBEDDING_MODEL: nomic-embed-text
+      ANALYZER_SEARCH_LIMIT: 5
+      ANALYZER_CONFIDENCE_THRESHOLD: 0.5
+
 volumes:
   postgres-data:
   ollama-data:

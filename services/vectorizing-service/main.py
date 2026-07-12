@@ -37,6 +37,24 @@ QUEUE_NAME = f"sezra.queue.{SERVICE_NAME}"
 QDRANT_COLLECTION_NAME = "sezra_semantic"
 EMBEDDING_VECTOR_SIZE = 768  # nomic-embed-text erzeugt 768-dimensionale Vektoren
 
+# Dupliziert aus deviation-detector-service (bewusst, keine geteilte
+# Bibliothek - siehe contracts/README.md, Abschnitt "Was ein Service
+# nicht tun darf"). "value"/"source_type": wie im Detector. Die uebrigen
+# Felder sind Anreicherungs-Metadaten, die knowledge-service zum Payload
+# hinzufuegt (semantic_text, source_event_id/type, source_occurred_at) -
+# ohne sie auszuschliessen, wuerde der composite_key hier NIE mit dem im
+# Detector aus dem rohen Payload berechneten uebereinstimmen (u. a. weil
+# source_event_id pro Event eindeutig ist), und der ganze
+# Selbst-Ausschluss-Mechanismus im Analyzer waere wirkungslos.
+NON_DIMENSION_FIELDS = {
+    "value",
+    "source_type",
+    "semantic_text",
+    "source_event_id",
+    "source_event_type",
+    "source_occurred_at",
+}
+
 
 def required_env(name: str) -> str:
     value = os.getenv(name)
@@ -101,17 +119,50 @@ def publish_dead_letter(channel, original_body: bytes, reason: str, failure_clas
 
 
 def create_embedding(text: str) -> list[float]:
+    """
+    nomic-embed-text erwartet ein Task-Prefix ("search_document:" fuer zu
+    speichernde/durchsuchende Texte, "search_query:" fuer Suchanfragen -
+    siehe Modell-Dokumentation). Ohne Prefix sind die Embeddings zwar
+    gueltig, aber nicht optimal fuer Retrieval kalibriert - das Modell
+    wurde explizit mit dieser Konvention trainiert.
+    """
+    prefixed_text = f"search_document: {text}"
+
     response = requests.post(
         f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/embeddings",
-        json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": text},
+        json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": prefixed_text},
         timeout=30,
     )
     response.raise_for_status()
     return response.json()["embedding"]
 
 
+def is_observation(payload: dict) -> bool:
+    return "metric" in payload and "value" in payload
+
+
+def build_composite_key(payload: dict) -> str:
+    """
+    Identisch zur Logik in deviation-detector-service: "metric" plus alle
+    weiteren Dimensions-Felder, sortiert. Ermoeglicht dem Analyzer, eine
+    Beobachtungsreihe von sich selbst als Ursachenkandidat auszuschliessen
+    (z. B. darf math_test_average=79 nicht als "Erklaerung" fuer
+    math_test_average=45 aus derselben Reihe gelten), waehrend eine
+    ANDERE Metrik-Reihe weiterhin als legitime Ursache infrage kommt.
+    """
+    dimension_items = sorted(
+        (key, value)
+        for key, value in payload.items()
+        if key not in NON_DIMENSION_FIELDS and key != "metric"
+    )
+    dimension_suffix = "|".join(f"{k}={v}" for k, v in dimension_items)
+    metric = payload["metric"]
+    return f"{metric}|{dimension_suffix}" if dimension_suffix else str(metric)
+
+
 def write_to_qdrant(qdrant_client: QdrantClient, envelope: dict, vector: list[float]) -> None:
     payload = envelope["payload"]
+    composite_key = build_composite_key(payload) if is_observation(payload) else None
 
     qdrant_client.upsert(
         collection_name=QDRANT_COLLECTION_NAME,
@@ -133,6 +184,9 @@ def write_to_qdrant(qdrant_client: QdrantClient, envelope: dict, vector: list[fl
                     # (z. B. bei aelteren Envelopes ohne diese Konvention).
                     "occurred_at": payload.get("source_occurred_at", envelope["occurred_at"]),
                     "semantic_text": payload.get("semantic_text"),
+                    # null bei Kontext-Events (keine Metrik-Beobachtung) -
+                    # die werden vom Analyzer dann nie ausgeschlossen.
+                    "composite_key": composite_key,
                 },
             )
         ],
