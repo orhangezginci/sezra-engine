@@ -24,15 +24,19 @@ os.environ["QDRANT_PORT"] = "6333"
 os.environ["OLLAMA_HOST"] = "localhost"
 os.environ["OLLAMA_PORT"] = "11434"
 os.environ["OLLAMA_EMBEDDING_MODEL"] = "nomic-embed-text"
+os.environ["LLM_PROVIDER"] = "ollama"
 os.environ["OLLAMA_GENERATION_MODEL"] = "qwen2.5:1.5b"
 os.environ["ANALYZER_CONFIDENCE_THRESHOLD"] = "0.5"
 
 import pytest  # noqa: E402
 import requests  # noqa: E402
 
+import main  # noqa: E402
 from main import (  # noqa: E402
     DEAD_LETTER_EXCHANGE,
     OUTPUT_EXCHANGE,
+    _generate_via_gemini,
+    _generate_via_openai,
     build_anomaly_search_text,
     build_investigation_payload,
     create_embedding,
@@ -256,6 +260,105 @@ class TestSearchRelatedContext:
         )
 
         assert results[0]["source_event_id"] == "b"
+
+
+class TestProviderDispatch:
+    def test_ollama_provider_calls_ollama_endpoint(self, monkeypatch):
+        monkeypatch.setattr(main, "LLM_PROVIDER", "ollama")
+        captured = {}
+
+        def fake_post(url, json=None, timeout=None, headers=None, params=None):
+            captured["url"] = url
+            response = MagicMock()
+            response.json.return_value = {"response": "text"}
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        generate_causal_explanation("summary", "cause")
+
+        assert "ollama" in captured["url"] or "/api/generate" in captured["url"]
+
+    def test_openai_provider_calls_openai_endpoint(self, monkeypatch):
+        monkeypatch.setattr(main, "LLM_PROVIDER", "openai")
+        monkeypatch.setattr(main, "OPENAI_API_KEY", "test-key")
+        monkeypatch.setattr(main, "OPENAI_GENERATION_MODEL", "gpt-4o-mini")
+        captured = {}
+
+        def fake_post(url, json=None, timeout=None, headers=None, params=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            response = MagicMock()
+            response.json.return_value = {
+                "choices": [{"message": {"content": "generated via openai"}}]
+            }
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        result = generate_causal_explanation("summary", "cause")
+
+        assert "openai.com" in captured["url"]
+        assert captured["headers"]["Authorization"] == "Bearer test-key"
+        assert result == "generated via openai"
+
+    def test_gemini_provider_calls_gemini_endpoint(self, monkeypatch):
+        monkeypatch.setattr(main, "LLM_PROVIDER", "gemini")
+        monkeypatch.setattr(main, "GEMINI_API_KEY", "test-key")
+        monkeypatch.setattr(main, "GEMINI_GENERATION_MODEL", "gemini-2.0-flash")
+        captured = {}
+
+        def fake_post(url, json=None, timeout=None, headers=None, params=None):
+            captured["url"] = url
+            captured["params"] = params
+            response = MagicMock()
+            response.json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": "generated via gemini"}]}}]
+            }
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        result = generate_causal_explanation("summary", "cause")
+
+        assert "generativelanguage.googleapis.com" in captured["url"]
+        assert captured["params"]["key"] == "test-key"
+        assert result == "generated via gemini"
+
+
+class TestGenerateViaOpenAI:
+    def test_parses_chat_completion_response(self, monkeypatch):
+        monkeypatch.setattr(main, "OPENAI_API_KEY", "test-key")
+        monkeypatch.setattr(main, "OPENAI_GENERATION_MODEL", "gpt-4o-mini")
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "choices": [{"message": {"content": "  eine Erklaerung  "}}]
+        }
+        fake_response.raise_for_status.return_value = None
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+
+        result = _generate_via_openai("some prompt")
+
+        assert result == "eine Erklaerung"
+
+
+class TestGenerateViaGemini:
+    def test_parses_generate_content_response(self, monkeypatch):
+        monkeypatch.setattr(main, "GEMINI_API_KEY", "test-key")
+        monkeypatch.setattr(main, "GEMINI_GENERATION_MODEL", "gemini-2.0-flash")
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "  eine Erklaerung  "}]}}]
+        }
+        fake_response.raise_for_status.return_value = None
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+
+        result = _generate_via_gemini("some prompt")
+
+        assert result == "eine Erklaerung"
 
 
 class TestGenerateCausalExplanation:

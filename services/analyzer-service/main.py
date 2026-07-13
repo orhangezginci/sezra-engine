@@ -66,7 +66,31 @@ QDRANT_PORT = int(required_env("QDRANT_PORT"))
 OLLAMA_HOST = required_env("OLLAMA_HOST")
 OLLAMA_PORT = required_env("OLLAMA_PORT")
 OLLAMA_EMBEDDING_MODEL = required_env("OLLAMA_EMBEDDING_MODEL")
-OLLAMA_GENERATION_MODEL = required_env("OLLAMA_GENERATION_MODEL")
+OLLAMA_GENERATION_MODEL = None
+OPENAI_API_KEY = None
+OPENAI_GENERATION_MODEL = None
+GEMINI_API_KEY = None
+GEMINI_GENERATION_MODEL = None
+
+# Entscheidet, welcher Anbieter fuer die Textgenerierung (nicht Embeddings -
+# die bleiben immer Ollama, siehe OLLAMA_EMBEDDING_MODEL oben) genutzt wird.
+# Mandatory, nicht optional mit Fallback: welcher Anbieter laeuft, hat
+# direkte Datenschutz-Implikationen (Ollama = lokal, OpenAI/Gemini = Cloud) -
+# das soll niemals stillschweigend "irgendwas" sein.
+LLM_PROVIDER = required_env("LLM_PROVIDER").lower()
+
+if LLM_PROVIDER == "ollama":
+    OLLAMA_GENERATION_MODEL = required_env("OLLAMA_GENERATION_MODEL")
+elif LLM_PROVIDER == "openai":
+    OPENAI_API_KEY = required_env("OPENAI_API_KEY")
+    OPENAI_GENERATION_MODEL = required_env("OPENAI_GENERATION_MODEL")
+elif LLM_PROVIDER == "gemini":
+    GEMINI_API_KEY = required_env("GEMINI_API_KEY")
+    GEMINI_GENERATION_MODEL = required_env("GEMINI_GENERATION_MODEL")
+else:
+    raise RuntimeError(
+        f"Unknown LLM_PROVIDER: '{LLM_PROVIDER}'. Must be 'ollama', 'openai', or 'gemini'."
+    )
 
 
 def connect_to_rabbitmq() -> pika.BlockingConnection:
@@ -138,22 +162,8 @@ def create_embedding(text: str) -> list[float]:
     return response.json()["embedding"]
 
 
-def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | None:
-    """
-    Nutzt ein generatives Modell (nicht das Embedding-Modell), um in
-    eigenen Worten zu erklaeren, WIE der gefundene Kontext zur Anomalie
-    gefuehrt haben koennte - Ergaenzung zum rohen semantic_text, nicht
-    Ersatz dafuer (Transparenz/Nachvollziehbarkeit bleibt erhalten).
-
-    Bewusst vorsichtig formuliert im Prompt: keine Tatsachenbehauptung,
-    da es sich weiterhin nur um eine semantische Korrelation handelt,
-    keine bewiesene Kausalitaet (siehe confidence_note).
-
-    Gibt None zurueck statt zu werfen, wenn die Generierung fehlschlaegt -
-    die Investigation soll trotzdem mit dem rohen semantic_text nutzbar
-    bleiben, auch ohne generierte Erklaerung.
-    """
-    prompt = (
+def build_explanation_prompt(anomaly_summary: str, cause_text: str) -> str:
+    return (
         f"Beobachtete Anomalie: {anomaly_summary}\n"
         f"Moeglicher Ausloeser: \"{cause_text}\"\n\n"
         "Erklaere in GENAU EINEM vollstaendigen Satz auf Deutsch die "
@@ -164,28 +174,91 @@ def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | 
         "eine Satz, keine Wiederholung der Eingabe."
     )
 
-    try:
-        response = requests.post(
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
-            json={
-                "model": OLLAMA_GENERATION_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    # Niedrige temperature gegen thematisches Abschweifen,
-                    # num_predict begrenzt die Antwortlaenge hart, statt
-                    # nur per Prompt-Anweisung ("ein Satz") zu hoffen, dass
-                    # das Modell sich daran haelt - qwen2.5:1.5b ignoriert
-                    # Laengenvorgaben im Prompt sonst zuverlaessig.
-                    "temperature": 0.3,
-                    "num_predict": 150,
-                },
+
+def _generate_via_ollama(prompt: str) -> str:
+    response = requests.post(
+        f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+        json={
+            "model": OLLAMA_GENERATION_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                # Niedrige temperature gegen thematisches Abschweifen,
+                # num_predict begrenzt die Antwortlaenge hart, statt nur
+                # per Prompt-Anweisung ("ein Satz") zu hoffen, dass das
+                # Modell sich daran haelt - kleine Modelle ignorieren
+                # Laengenvorgaben im Prompt sonst zuverlaessig.
+                "temperature": 0.3,
+                "num_predict": 150,
             },
-            timeout=180,
-        )
-        response.raise_for_status()
-        return response.json()["response"].strip()
-    except (requests.RequestException, KeyError, ValueError) as error:
+        },
+        timeout=180,  # lokale CPU-Inferenz ist deutlich langsamer als Cloud
+    )
+    response.raise_for_status()
+    return response.json()["response"].strip()
+
+
+def _generate_via_openai(prompt: str) -> str:
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        json={
+            "model": OPENAI_GENERATION_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 150,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def _generate_via_gemini(prompt: str) -> str:
+    response = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_GENERATION_MODEL}:generateContent",
+        params={"key": GEMINI_API_KEY},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 150},
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | None:
+    """
+    Nutzt ein generatives Modell (nicht das Embedding-Modell), um in
+    eigenen Worten zu erklaeren, WIE der gefundene Kontext zur Anomalie
+    gefuehrt haben koennte - Ergaenzung zum rohen semantic_text, nicht
+    Ersatz dafuer (Transparenz/Nachvollziehbarkeit bleibt erhalten).
+
+    Anbieter ist ueber LLM_PROVIDER konfigurierbar: "ollama" fuer
+    produktiven Einsatz mit sensiblen Daten (bleibt lokal), "openai"/
+    "gemini" z. B. fuer schnellere/qualitativ bessere Ergebnisse waehrend
+    der Entwicklung mit unkritischen Testdaten.
+
+    Bewusst vorsichtig formuliert im Prompt: keine Tatsachenbehauptung,
+    da es sich weiterhin nur um eine semantische Korrelation handelt,
+    keine bewiesene Kausalitaet (siehe confidence_note).
+
+    Gibt None zurueck statt zu werfen, wenn die Generierung fehlschlaegt -
+    die Investigation soll trotzdem mit dem rohen semantic_text nutzbar
+    bleiben, auch ohne generierte Erklaerung.
+    """
+    prompt = build_explanation_prompt(anomaly_summary, cause_text)
+
+    try:
+        if LLM_PROVIDER == "ollama":
+            return _generate_via_ollama(prompt)
+        elif LLM_PROVIDER == "openai":
+            return _generate_via_openai(prompt)
+        elif LLM_PROVIDER == "gemini":
+            return _generate_via_gemini(prompt)
+    except (requests.RequestException, KeyError, IndexError, ValueError) as error:
         print(f"[{SERVICE_NAME}] Explanation generation failed, continuing without it: {error}")
         return None
 
