@@ -182,6 +182,12 @@ def _generate_via_ollama(prompt: str) -> str:
             "model": OLLAMA_GENERATION_MODEL,
             "prompt": prompt,
             "stream": False,
+            # Hybrid-Reasoning-Modelle (z. B. qwen3) denken sonst intern
+            # nach, bevor sichtbarer Text entsteht - dasselbe Problem, das
+            # bei gemini-2.5-flash zu abgeschnittenen Antworten fuehrte
+            # (Denk-Tokens zaehlten gegen das Antwort-Budget). Modelle ohne
+            # Reasoning-Unterstuetzung ignorieren dieses Feld einfach.
+            "think": False,
             "options": {
                 # Niedrige temperature gegen thematisches Abschweifen,
                 # num_predict begrenzt die Antwortlaenge hart, statt nur
@@ -221,7 +227,17 @@ def _generate_via_gemini(prompt: str) -> str:
         params={"key": GEMINI_API_KEY},
         json={
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 150},
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 400,
+                # gemini-2.5-* nutzt standardmaessig interne "Thinking"-
+                # Tokens, die GEGEN maxOutputTokens zaehlen - bei einem
+                # knappen Budget kann das Nachdenken den gesamten Rahmen
+                # aufbrauchen, bevor sichtbarer Text entsteht (beobachtet:
+                # Antwort brach nach zwei Wörtern ab). Fuer diese simple
+                # Ein-Satz-Aufgabe ist tiefes Reasoning nicht noetig.
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         },
         timeout=60,
     )
