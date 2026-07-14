@@ -105,13 +105,20 @@ def derive_event_type(raw_data: dict) -> str:
 
 
 def build_envelope(raw_data: dict) -> dict:
+    event_id = str(uuid4())
     return {
         "schema_version": "1.1",
-        "event_id": str(uuid4()),
+        "event_id": event_id,
         "event_type": derive_event_type(raw_data),
         "source": SERVICE_NAME,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         "project_id": SEZRA_PROJECT_ID,
+        # Selbstreferenziell: dieses Envelope ist der Ursprung einer neuen
+        # Kette. Ohne das bleibt correlation_id null, und nachgelagerte
+        # Services (die per "envelope.get('correlation_id') or
+        # source_event_id" auf die event_id ausweichen) koennen die Kette
+        # nie bis zum Ursprung zurueckverfolgen - der erste Link fehlt.
+        "correlation_id": event_id,
         "payload": raw_data,
     }
 

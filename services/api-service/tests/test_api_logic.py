@@ -63,6 +63,17 @@ class TestBuildEnvelope:
         assert envelope["payload"]["metric"] == "test"
         assert envelope["payload"]["value"] == 42
 
+    def test_correlation_id_defaults_to_own_event_id(self):
+        """
+        Regressionstest, analog zu json-adapter-service: ohne diese
+        Selbstreferenz bleibt correlation_id null, und keine nach-
+        gelagerte Kette kann jemals bis zu diesem Ursprungsevent
+        zurueckverfolgt werden.
+        """
+        envelope = build_envelope({"value": 1}, "observation")
+
+        assert envelope["correlation_id"] == envelope["event_id"]
+
 
 class TestPostEndpoints:
     def test_post_observation_publishes_and_returns_event_id(self, monkeypatch):

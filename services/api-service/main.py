@@ -92,14 +92,19 @@ def build_envelope(raw_data: dict, source_type: str) -> dict:
     """
     payload = {**raw_data, "source_type": source_type}
     event_type = SOURCE_TYPE_TO_EVENT_TYPE[source_type]
+    event_id = str(uuid4())
 
     return {
         "schema_version": "1.1",
-        "event_id": str(uuid4()),
+        "event_id": event_id,
         "event_type": event_type,
         "source": SERVICE_NAME,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         "project_id": SEZRA_PROJECT_ID,
+        # Selbstreferenziell: siehe json-adapter-service main.py fuer die
+        # ausfuehrliche Begruendung - ohne das faengt keine Korrelations-
+        # Kette bei ihrem eigentlichen Ursprung an.
+        "correlation_id": event_id,
         "payload": payload,
     }
 

@@ -72,3 +72,15 @@ class TestBuildEnvelope:
         second = build_envelope(raw)
 
         assert first["event_id"] != second["event_id"]
+
+    def test_correlation_id_defaults_to_own_event_id(self):
+        """
+        Regressionstest: ohne diese Selbstreferenz bleibt correlation_id
+        null, und keine nachgelagerte Kette (Anomalie, Investigation)
+        kann jemals bis zu dieser Beobachtung zurueckverfolgt werden -
+        gefunden, als Studio Light's Ablaufprotokoll leer blieb.
+        """
+        raw = {"source_type": "observation", "value": 1}
+        envelope = build_envelope(raw)
+
+        assert envelope["correlation_id"] == envelope["event_id"]

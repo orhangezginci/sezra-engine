@@ -1,7 +1,8 @@
 """
 persistence-service
 
-Konsumiert von sezra.stream.validated UND sezra.stream.investigation,
+Konsumiert von sezra.stream.validated, sezra.stream.anomaly UND
+sezra.stream.investigation,
 schreibt jedes gueltige Envelope als Zeile in die events-Tabelle
 (PostgreSQL). Additive Knowledge-Kette: Investigation-Ergebnisse werden
 genauso persistiert wie die urspruenglichen Beobachtungen, beide bleiben
@@ -30,7 +31,7 @@ SERVICE_NAME = "persistence-service"
 DEAD_LETTER_EXCHANGE = "sezra.stream.dead_letter"
 DEAD_LETTER_ROUTING_KEY = f"{SERVICE_NAME}.failed"
 
-INPUT_EXCHANGES = ["sezra.stream.validated", "sezra.stream.investigation"]
+INPUT_EXCHANGES = ["sezra.stream.validated", "sezra.stream.anomaly", "sezra.stream.investigation"]
 QUEUE_NAME = f"sezra.queue.{SERVICE_NAME}"
 
 
