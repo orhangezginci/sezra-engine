@@ -284,6 +284,7 @@ class TestProviderDispatch:
         monkeypatch.setattr(main, "LLM_PROVIDER", "openai")
         monkeypatch.setattr(main, "OPENAI_API_KEY", "test-key")
         monkeypatch.setattr(main, "OPENAI_GENERATION_MODEL", "gpt-4o-mini")
+        monkeypatch.setattr(main, "OPENAI_BASE_URL", "https://api.openai.com/v1")
         captured = {}
 
         def fake_post(url, json=None, timeout=None, headers=None, params=None):
@@ -333,6 +334,7 @@ class TestGenerateViaOpenAI:
     def test_parses_chat_completion_response(self, monkeypatch):
         monkeypatch.setattr(main, "OPENAI_API_KEY", "test-key")
         monkeypatch.setattr(main, "OPENAI_GENERATION_MODEL", "gpt-4o-mini")
+        monkeypatch.setattr(main, "OPENAI_BASE_URL", "https://api.openai.com/v1")
         fake_response = MagicMock()
         fake_response.json.return_value = {
             "choices": [{"message": {"content": "  eine Erklaerung  "}}]
@@ -343,6 +345,30 @@ class TestGenerateViaOpenAI:
         result = _generate_via_openai("some prompt")
 
         assert result == "eine Erklaerung"
+
+    def test_uses_configured_base_url_for_openai_compatible_providers(self, monkeypatch):
+        """
+        Grok (xAI) und DeepSeek sind OpenAI-kompatibel - eine konfigurierbare
+        Basis-URL statt eines hartcodierten OpenAI-Endpunkts erlaubt, sie ohne
+        eigenen Code-Pfad zu nutzen.
+        """
+        monkeypatch.setattr(main, "OPENAI_API_KEY", "test-key")
+        monkeypatch.setattr(main, "OPENAI_GENERATION_MODEL", "grok-3")
+        monkeypatch.setattr(main, "OPENAI_BASE_URL", "https://api.x.ai/v1")
+        captured = {}
+
+        def fake_post(url, json=None, timeout=None, headers=None, params=None):
+            captured["url"] = url
+            response = MagicMock()
+            response.json.return_value = {"choices": [{"message": {"content": "text"}}]}
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        _generate_via_openai("some prompt")
+
+        assert captured["url"] == "https://api.x.ai/v1/chat/completions"
 
 
 class TestGenerateViaGemini:

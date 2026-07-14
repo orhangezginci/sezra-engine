@@ -69,6 +69,7 @@ OLLAMA_EMBEDDING_MODEL = required_env("OLLAMA_EMBEDDING_MODEL")
 OLLAMA_GENERATION_MODEL = None
 OPENAI_API_KEY = None
 OPENAI_GENERATION_MODEL = None
+OPENAI_BASE_URL = None
 GEMINI_API_KEY = None
 GEMINI_GENERATION_MODEL = None
 
@@ -84,6 +85,16 @@ if LLM_PROVIDER == "ollama":
 elif LLM_PROVIDER == "openai":
     OPENAI_API_KEY = required_env("OPENAI_API_KEY")
     OPENAI_GENERATION_MODEL = required_env("OPENAI_GENERATION_MODEL")
+    # Grok (xAI) und DeepSeek bieten beide OpenAI-kompatible APIs an -
+    # gleiches Request-/Response-Format wie OpenAI selbst. Deshalb reicht
+    # eine konfigurierbare Basis-URL statt eines eigenen Code-Pfads pro
+    # Anbieter. Default bleibt die echte OpenAI-API.
+    # "or" statt Default-Parameter: docker-compose setzt bei fehlendem
+    # .env-Eintrag einen LEEREN String, nicht "gar nicht gesetzt" -
+    # os.getenv(..., default) wuerde den leeren String zurueckgeben, nicht
+    # den Default (derselbe Bug-Typ, der uns schon beim Postgres-
+    # Healthcheck begegnet ist).
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
 elif LLM_PROVIDER == "gemini":
     GEMINI_API_KEY = required_env("GEMINI_API_KEY")
     GEMINI_GENERATION_MODEL = required_env("GEMINI_GENERATION_MODEL")
@@ -206,7 +217,7 @@ def _generate_via_ollama(prompt: str) -> str:
 
 def _generate_via_openai(prompt: str) -> str:
     response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
+        f"{OPENAI_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
         json={
             "model": OPENAI_GENERATION_MODEL,
