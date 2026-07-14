@@ -169,6 +169,73 @@ class TestGetEndpoints:
 
         assert response.status_code == 200
 
+    def test_get_events_accepts_correlation_id_filter(self, monkeypatch):
+        """
+        correlation_id erlaubt, die komplette Kette eines Vorfalls
+        abzurufen (Beobachtung -> Anomalie -> Investigation) - genutzt
+        sowohl von Studio Light als auch potenziell von der API direkt.
+        """
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = []
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/events?correlation_id=some-correlation-id")
+
+        assert response.status_code == 200
+        call_args = fake_cursor.execute.call_args
+        assert "correlation_id = %s" in call_args[0][0]
+        assert "some-correlation-id" in call_args[0][1]
+
+    def test_get_events_combines_event_type_and_correlation_id_filters(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = []
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get(
+            "/events?event_type=AnomalyDetected&correlation_id=some-correlation-id"
+        )
+
+        assert response.status_code == 200
+        call_args = fake_cursor.execute.call_args
+        query = call_args[0][0]
+        assert "event_type = %s" in query
+        assert "correlation_id = %s" in query
+        assert "AND" in query
+
+    def test_get_investigations_includes_correlation_id(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = [
+            {
+                "event_id": "abc",
+                "correlation_id": "corr-1",
+                "occurred_at": "2026-01-01T00:00:00Z",
+                "payload": {"anomaly_summary": "x"},
+            }
+        ]
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/investigations")
+
+        assert response.json()[0]["correlation_id"] == "corr-1"
+
 
 class TestHealth:
     def test_health_endpoint_returns_ok(self):

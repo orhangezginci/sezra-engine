@@ -167,7 +167,8 @@ def get_investigations(limit: int = 20):
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT event_id, occurred_at, received_at, project_id, payload
+                SELECT event_id, correlation_id, occurred_at, received_at,
+                       project_id, payload
                 FROM events
                 WHERE event_type = 'InvestigationGenerated'
                 ORDER BY received_at DESC
@@ -189,7 +190,8 @@ def get_investigation(event_id: str):
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT event_id, occurred_at, received_at, project_id, payload
+                SELECT event_id, correlation_id, occurred_at, received_at,
+                       project_id, payload
                 FROM events
                 WHERE event_type = 'InvestigationGenerated' AND event_id = %s
                 """,
@@ -206,33 +208,46 @@ def get_investigation(event_id: str):
 
 
 @app.get("/events")
-def get_events(event_type: str | None = None, limit: int = 50):
+def get_events(
+    event_type: str | None = None,
+    correlation_id: str | None = None,
+    limit: int = 50,
+):
+    """
+    correlation_id erlaubt, die komplette Kette eines Vorfalls abzurufen -
+    z. B. die urspruengliche Beobachtung, die erkannte Anomalie und die
+    daraus entstandene Investigation gehoeren alle zur selben
+    correlation_id (additiv durch die Pipeline durchgereicht, siehe
+    contracts/README.md). Kombinierbar mit event_type, um z. B. gezielt
+    nur die Anomalie einer bestimmten Kette zu holen.
+    """
+    conditions = []
+    params: list = []
+
+    if event_type:
+        conditions.append("event_type = %s")
+        params.append(event_type)
+    if correlation_id:
+        conditions.append("correlation_id = %s")
+        params.append(correlation_id)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit)
+
     connection = connect_to_postgres()
     try:
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            if event_type:
-                cursor.execute(
-                    """
-                    SELECT event_id, event_type, source, occurred_at, received_at,
-                           project_id, payload
-                    FROM events
-                    WHERE event_type = %s
-                    ORDER BY received_at DESC
-                    LIMIT %s
-                    """,
-                    (event_type, limit),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT event_id, event_type, source, occurred_at, received_at,
-                           project_id, payload
-                    FROM events
-                    ORDER BY received_at DESC
-                    LIMIT %s
-                    """,
-                    (limit,),
-                )
+            cursor.execute(
+                f"""
+                SELECT event_id, event_type, source, correlation_id, occurred_at,
+                       received_at, project_id, payload
+                FROM events
+                {where_clause}
+                ORDER BY received_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
             rows = cursor.fetchall()
     finally:
         connection.close()
