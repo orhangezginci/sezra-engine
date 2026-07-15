@@ -167,6 +167,15 @@ def post_context(raw_data: dict):
 
 @app.get("/investigations")
 def get_investigations(limit: int = 20):
+    """
+    Investigations mit gefundenen Ursachen erscheinen zuerst, "keine
+    Ursache gefunden"-Ergebnisse (leere possible_causes) nachrangig.
+    Aendert nichts an der Analyzer-Logik selbst - ein leeres Ergebnis
+    bleibt ehrlich sichtbar, wird nur nicht mehr gleichrangig mit
+    erfolgreichen Investigations vermischt (sonst muss der Nutzer
+    zwischen mehreren Eintraegen suchen, um das eigentlich interessante
+    Ergebnis zu finden - fuer ein Demo/Studio-Erlebnis inakzeptabel).
+    """
     connection = connect_to_postgres()
     try:
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
@@ -176,7 +185,8 @@ def get_investigations(limit: int = 20):
                        project_id, payload
                 FROM events
                 WHERE event_type = 'InvestigationGenerated'
-                ORDER BY received_at DESC
+                ORDER BY jsonb_array_length(payload->'possible_causes') DESC,
+                         received_at DESC
                 LIMIT %s
                 """,
                 (limit,),

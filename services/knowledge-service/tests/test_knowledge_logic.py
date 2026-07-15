@@ -46,7 +46,7 @@ def make_method():
 VALID_ENVELOPE = {
     "schema_version": "1.0",
     "event_id": "6f9c2b1a-4e3a-4a3a-9c1a-2b1a4e3a4a3a",
-    "event_type": "ObservationIngested",
+    "event_type": "ContextIngested",
     "source": "json-adapter-service",
     "occurred_at": "2026-07-05T10:00:00Z",
     "payload": {"metric": "math_test_average", "value": 78, "source_type": "observation"},
@@ -67,6 +67,29 @@ class TestBuildSemanticText:
 
     def test_empty_payload_produces_empty_string(self):
         assert build_semantic_text({}) == ""
+
+    def test_excludes_technical_pipeline_fields(self):
+        """
+        source_event_id (UUID), composite_key etc. sind Pipeline-
+        Metadaten, kein fachlicher Inhalt - wuerden den Einbettungstext
+        mit bedeutungslosem Rauschen verunreinigen (relevant vor allem
+        fuer AnomalyDetected-Payloads, die diese Felder fuehren).
+        """
+        text = build_semantic_text(
+            {
+                "metric": "checkout_error_rate",
+                "composite_key": "checkout_error_rate",
+                "source_event_id": "6f9c2b1a-4e3a-4a3a-9c1a-2b1a4e3a4a3a",
+                "source_event_type": "ObservationIngested",
+                "source_occurred_at": "2026-07-14T22:45:18Z",
+            }
+        )
+
+        assert "metric: checkout_error_rate" in text
+        assert "composite_key" not in text
+        assert "source_event_id" not in text
+        assert "source_event_type" not in text
+        assert "source_occurred_at" not in text
 
     def test_works_identically_across_different_domains(self):
         """
@@ -150,6 +173,46 @@ class TestCreateEnrichedEvent:
 
 
 class TestHandleMessage:
+    def test_observation_ingested_is_skipped_without_enrichment(self):
+        """
+        Regressionstest fuer den Kern-Fix: eine normale Beobachtung wird
+        NICHT angereichert/vektorisiert - sie beschreibt nur einen
+        Normalzustand und kann keine Anomalie ausloesen. Ohne diesen
+        Filter fluteten Baseline-Werte den Analyzer-Kandidatenpool mit
+        bedeutungslosen, aber zeitlich zufaellig passenden "Ursachen"
+        (gefunden im E-Commerce-Szenario: conversion_rate-Baseline-Werte
+        erschienen faelschlich als Ursache fuer den checkout_error_rate-
+        Spike, nur weil sie zeitlich davor lagen).
+        """
+        channel = FakeChannel()
+        envelope = dict(VALID_ENVELOPE)
+        envelope["event_type"] = "ObservationIngested"
+        body = json.dumps(envelope).encode("utf-8")
+
+        handle_message(channel, make_method(), None, body)
+
+        assert channel.published == []
+        assert channel.acked == [1]
+
+    def test_anomaly_detected_is_enriched(self):
+        channel = FakeChannel()
+        envelope = dict(VALID_ENVELOPE)
+        envelope["event_type"] = "AnomalyDetected"
+        body = json.dumps(envelope).encode("utf-8")
+
+        handle_message(channel, make_method(), None, body)
+
+        assert len(channel.published) == 1
+        assert channel.published[0]["exchange"] == OUTPUT_EXCHANGE
+
+    def test_context_ingested_is_enriched(self):
+        channel = FakeChannel()
+        body = json.dumps(VALID_ENVELOPE).encode("utf-8")  # event_type bereits ContextIngested
+
+        handle_message(channel, make_method(), None, body)
+
+        assert len(channel.published) == 1
+
     def test_valid_envelope_is_published_to_enriched_exchange(self):
         channel = FakeChannel()
         body = json.dumps(VALID_ENVELOPE).encode("utf-8")

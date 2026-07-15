@@ -1,9 +1,17 @@
 """
 knowledge-service
 
-Konsumiert von sezra.stream.validated, erzeugt eine deterministische,
-semantische Textbeschreibung (semantic_text) aus den vorhandenen
-payload-Feldern - noch kein LLM-Aufruf, reine Feld-zu-Text-Zusammensetzung.
+Konsumiert von sezra.stream.validated UND sezra.stream.anomaly, erzeugt
+eine deterministische, semantische Textbeschreibung (semantic_text) aus
+den vorhandenen payload-Feldern - noch kein LLM-Aufruf, reine
+Feld-zu-Text-Zusammensetzung.
+
+Nur ContextIngested- und AnomalyDetected-Events werden tatsaechlich
+angereichert (siehe ENRICHABLE_EVENT_TYPES) - eine normale Beobachtung
+kann keine Anomalie ausloesen, sie beschreibt nur einen Normalzustand.
+Ohne diese Einschraenkung fluteten Baseline-Werte den spaeteren
+Ursachen-Kandidatenpool des Analyzers mit bedeutungslosen, aber zeitlich
+zufaellig passenden Treffern.
 
 Published das Original-Envelope additiv angereichert (Original bleibt
 unveraendert erhalten, semantic_text kommt als neues payload-Feld dazu)
@@ -28,8 +36,18 @@ SERVICE_NAME = "knowledge-service"
 DEAD_LETTER_EXCHANGE = "sezra.stream.dead_letter"
 DEAD_LETTER_ROUTING_KEY = f"{SERVICE_NAME}.failed"
 
-INPUT_EXCHANGE = "sezra.stream.validated"
+INPUT_EXCHANGES = ["sezra.stream.validated", "sezra.stream.anomaly"]
 OUTPUT_EXCHANGE = "sezra.stream.enriched.semantic"
+
+# Nur diese Event-Types werden angereichert/vektorisiert - eine normale
+# Beobachtung ("Conversion-Rate war heute 3.6%, wie ueblich") kann keine
+# Anomalie ausloesen, sie beschreibt nur einen Normalzustand. Nur
+# Kontext-Events (bewusst eingereichter Text) und bereits erkannte
+# Anomalien sind sinnvolle Ursachen-Kandidaten fuer den spaeteren
+# Analyzer. Gefunden, weil der Analyzer sonst triviale Baseline-Werte
+# als "Ursache" fuer andere Anomalien vorschlug, nur weil sie zeitlich
+# davor lagen und strukturell aehnlichen Text erzeugten.
+ENRICHABLE_EVENT_TYPES = {"ContextIngested", "AnomalyDetected"}
 QUEUE_NAME = f"sezra.queue.{SERVICE_NAME}"
 
 
@@ -65,15 +83,26 @@ def connect_to_rabbitmq() -> pika.BlockingConnection:
             time.sleep(3)
 
 
+# Technische Pipeline-Metadaten, nie fachlicher Inhalt - wuerden den
+# Einbettungstext mit bedeutungslosem Rauschen (UUIDs, internen
+# Zeitstempeln) verunreinigen, wenn sie mit eingebettet wuerden. Gilt
+# uebergreifend fuer jeden Event-Type, der sie fuehrt (z. B.
+# AnomalyDetected).
+NON_SEMANTIC_FIELDS = {"composite_key", "source_event_id", "source_event_type", "source_occurred_at"}
+
+
 def build_semantic_text(payload: dict) -> str:
     """
     Generische Feld-zu-Text-Zusammensetzung, bewusst ohne Wissen ueber
     bestimmte Feldnamen (kein "if metric_name == ...") - funktioniert
     gleichermassen fuer School-, Healthcare- oder Manufacturing-Payloads,
-    weil sie einfach ueber alle vorhandenen Felder iteriert.
+    weil sie einfach ueber alle vorhandenen Felder iteriert (ausser
+    technischen Pipeline-Feldern, siehe NON_SEMANTIC_FIELDS).
     """
     parts = []
     for key, value in payload.items():
+        if key in NON_SEMANTIC_FIELDS:
+            continue
         readable_key = key.replace("_", " ")
         parts.append(f"{readable_key}: {value}")
     return "; ".join(parts)
@@ -145,6 +174,16 @@ def handle_message(channel, method, properties, body: bytes) -> None:
         channel.basic_ack(delivery_tag=method.delivery_tag)
         return
 
+    if envelope["event_type"] not in ENRICHABLE_EVENT_TYPES:
+        # Kein Fehler - z. B. eine normale ObservationIngested-Beobachtung
+        # wird bewusst nicht angereichert/vektorisiert (siehe
+        # ENRICHABLE_EVENT_TYPES). Sie bleibt fuer die Anomalieerkennung
+        # selbst nutzbar (deviation-detector-service) und wird weiterhin
+        # in Postgres gespeichert, taucht aber nie als Ursachen-Kandidat
+        # in der Vektorsuche auf.
+        channel.basic_ack(delivery_tag=method.delivery_tag)
+        return
+
     semantic_text = build_semantic_text(envelope["payload"])
     enriched_event = create_enriched_event(envelope, semantic_text)
 
@@ -179,14 +218,15 @@ def main() -> None:
     connection = connect_to_rabbitmq()
     channel = connection.channel()
 
-    channel.exchange_declare(exchange=INPUT_EXCHANGE, exchange_type="fanout", durable=True)
     channel.exchange_declare(exchange=OUTPUT_EXCHANGE, exchange_type="fanout", durable=True)
     channel.exchange_declare(exchange=DEAD_LETTER_EXCHANGE, exchange_type="fanout", durable=True)
-
     channel.queue_declare(queue=QUEUE_NAME, durable=True)
-    channel.queue_bind(exchange=INPUT_EXCHANGE, queue=QUEUE_NAME)
 
-    print(f"[{SERVICE_NAME}] listening on queue: {QUEUE_NAME}")
+    for exchange in INPUT_EXCHANGES:
+        channel.exchange_declare(exchange=exchange, exchange_type="fanout", durable=True)
+        channel.queue_bind(exchange=exchange, queue=QUEUE_NAME)
+
+    print(f"[{SERVICE_NAME}] listening on queue: {QUEUE_NAME} (exchanges: {INPUT_EXCHANGES})")
 
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=handle_message)
     channel.start_consuming()

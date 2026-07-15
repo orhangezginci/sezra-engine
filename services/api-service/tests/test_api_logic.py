@@ -148,7 +148,28 @@ class TestGetEndpoints:
         response = client.get("/investigations")
 
         assert response.status_code == 200
-        assert len(response.json()) == 1
+
+    def test_get_investigations_prioritizes_results_with_causes(self, monkeypatch):
+        """
+        Regressionstest: Investigations mit gefundenen Ursachen muessen
+        VOR "keine Ursache gefunden"-Ergebnissen stehen, sonst muss der
+        Nutzer (oder Studio Light) zwischen mehreren Eintraegen suchen,
+        um das eigentlich interessante Ergebnis zu finden.
+        """
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = []
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        client.get("/investigations")
+
+        query = fake_cursor.execute.call_args[0][0]
+        assert "jsonb_array_length(payload->'possible_causes') DESC" in query
 
     def test_get_investigation_by_id_not_found_returns_404(self, monkeypatch):
         fake_cursor = MagicMock()

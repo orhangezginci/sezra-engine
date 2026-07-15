@@ -181,8 +181,12 @@ def build_explanation_prompt(anomaly_summary: str, cause_text: str) -> str:
         "Wirkungskette: WARUM koennte dieser Ausloeser konkret zu GENAU "
         "DIESER Anomalie gefuehrt haben? Nenne einen plausiblen "
         "Zwischenschritt (z. B. Auswirkung auf Konzentration, Zeit, "
-        "Ressourcen). Nutze \"koennte\" oder \"moeglicherweise\". Nur der "
-        "eine Satz, keine Wiederholung der Eingabe."
+        "Ressourcen). Metriken wie 'rate' oder 'average' sind statistische "
+        "Zusammenfassungen vieler Einzelereignisse, keine direkt "
+        "steuerbaren Werte - formuliere entsprechend praezise (z. B. "
+        "'wodurch sich X erhoehte/verringerte', nicht 'die Nutzer haben "
+        "die Rate gesenkt'). Nutze \"koennte\" oder \"moeglicherweise\". Nur "
+        "der eine Satz, keine Wiederholung der Eingabe."
     )
 
 
