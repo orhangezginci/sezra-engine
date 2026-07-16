@@ -30,7 +30,7 @@ CONSUMER_QUEUES="sezra.queue.ingestion-service sezra.queue.knowledge-service sez
 # per HTTP ein, nicht per Datei) - laeuft aber nicht im Weg, falls man
 # ihn trotzdem mitstarten will. Hier bewusst weggelassen, um den Stack
 # schlank zu halten.
-STACK_SERVICES="rabbitmq postgres ollama ollama-model-pull qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service"
+STACK_SERVICES="rabbitmq postgres ollama-model-pull qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service"
 
 if [ ! -f "docker-compose.yml" ]; then
   echo "Fehler: docker-compose.yml nicht gefunden. Im Repo-Root ausfuehren."

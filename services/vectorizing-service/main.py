@@ -88,6 +88,12 @@ def connect_to_rabbitmq() -> pika.BlockingConnection:
                     host=RABBITMQ_HOST,
                     port=RABBITMQ_PORT,
                     credentials=credentials,
+                    # Vorbeugend wie in analyzer-service/context-severity-
+                    # detector-service: ein blockierender Embedding-Aufruf
+                    # koennte laenger dauern als RabbitMQ's Heartbeat-
+                    # Default (60s) toleriert, besonders ueber die
+                    # host.docker.internal-Bruecke.
+                    heartbeat=600,
                 )
             )
         except pika.exceptions.AMQPConnectionError:
@@ -131,7 +137,9 @@ def create_embedding(text: str) -> list[float]:
     response = requests.post(
         f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/embeddings",
         json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": prefixed_text},
-        timeout=30,
+        # War 30s - zu knapp bei Ollama-Model-Swapping (siehe
+        # analyzer-service main.py fuer die ausfuehrliche Begruendung).
+        timeout=90,
     )
     response.raise_for_status()
     return response.json()["embedding"]

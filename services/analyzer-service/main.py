@@ -110,7 +110,17 @@ def connect_to_rabbitmq() -> pika.BlockingConnection:
         try:
             return pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host=RABBITMQ_HOST, port=RABBITMQ_PORT, credentials=credentials
+                    host=RABBITMQ_HOST,
+                    port=RABBITMQ_PORT,
+                    credentials=credentials,
+                    # Waehrend eines LLM-Aufrufs (bis zu 180s bei Ollama)
+                    # blockiert handle_message vollstaendig - pika kann in
+                    # dieser Zeit keine Heartbeats senden. Mit dem
+                    # RabbitMQ-Default (60s) killt der Broker die
+                    # Verbindung dann selbst, mitten in der Verarbeitung
+                    # (Bug gefunden in context-severity-detector-service,
+                    # betrifft aber jeden Service mit langen LLM-Aufrufen).
+                    heartbeat=600,
                 )
             )
         except pika.exceptions.AMQPConnectionError:
@@ -172,7 +182,12 @@ def create_embedding(text: str) -> list[float]:
     response = requests.post(
         f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/embeddings",
         json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": prefixed_text},
-        timeout=30,
+        # War 30s - zu knapp, wenn Ollama zwischen dem Generierungsmodell
+        # (z. B. gemma4) und dem Embedding-Modell (nomic-embed-text)
+        # wechseln muss ("Model Swapping"). Beobachtet: Timeout direkt
+        # nachdem context-severity-detector-service kurz zuvor einen
+        # gemma4-Aufruf gemacht hatte.
+        timeout=90,
     )
     response.raise_for_status()
     return response.json()["embedding"]
@@ -380,12 +395,30 @@ def search_related_context(
     return plausible[:SEARCH_LIMIT]
 
 
+def build_anomaly_summary(payload: dict) -> str:
+    """
+    Wie build_anomaly_search_text: unterscheidet zwischen Metrik- und
+    Text-Anomalien, statt blind von "metric"/"previous_value"/
+    "current_value" auszugehen. Ohne diese Unterscheidung erzeugte eine
+    Severity-Anomalie (kein "metric"-Feld) die irrefuehrende
+    Zusammenfassung "None changed from None to None (severity)".
+    """
+    text = payload.get("text")
+    metric = payload.get("metric")
+
+    if text:
+        return f"High-severity message flagged (score: {payload.get('severity_score')}): \"{text}\""
+    elif metric:
+        return (
+            f"{metric} changed from {payload.get('previous_value')} "
+            f"to {payload.get('current_value')} ({payload.get('anomaly_type')})"
+        )
+    return "Anomaly detected."
+
+
 def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) -> dict:
     payload = anomaly_envelope["payload"]
-    anomaly_summary = (
-        f"{payload.get('metric')} changed from {payload.get('previous_value')} "
-        f"to {payload.get('current_value')} ({payload.get('anomaly_type')})"
-    )
+    anomaly_summary = build_anomaly_summary(payload)
 
     confident_candidates = [c for c in candidates if c["confidence"] >= CONFIDENCE_THRESHOLD]
 

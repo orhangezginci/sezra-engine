@@ -94,7 +94,18 @@ def connect_to_rabbitmq() -> pika.BlockingConnection:
         try:
             return pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host=RABBITMQ_HOST, port=RABBITMQ_PORT, credentials=credentials
+                    host=RABBITMQ_HOST,
+                    port=RABBITMQ_PORT,
+                    credentials=credentials,
+                    # Waehrend eines LLM-Aufrufs (bis zu 180s bei Ollama)
+                    # blockiert handle_message vollstaendig - pika kann in
+                    # dieser Zeit keine Heartbeats senden. Mit dem
+                    # RabbitMQ-Default (60s) killt der Broker die
+                    # Verbindung dann selbst, mitten in der Verarbeitung
+                    # (beobachtet: "Connection reset by peer" direkt nach
+                    # einem Ollama-Timeout). Grosszuegig genug fuer den
+                    # laengsten realistischen LLM-Aufruf plus Puffer.
+                    heartbeat=600,
                 )
             )
         except pika.exceptions.AMQPConnectionError:

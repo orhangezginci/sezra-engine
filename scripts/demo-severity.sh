@@ -1,17 +1,19 @@
 #!/bin/bash
 set -e
 
-# Demo-Szenario: Deployment loest einen Anstieg der API-Fehlerrate aus.
-# Drittes Szenario im selben Muster wie School (Metrik-Anomalie <- Text-
-# Ursache), diesmal aus einer IT/DevOps-Domaene - untermauert die
-# Domaenenagnostizitaet zusaetzlich zum bereits bewiesenen Metrik-zu-
-# Metrik-Fall (E-Commerce).
+# Demo-Szenario: eine einzelne, dringliche Beschwerde loest sofort eine
+# Untersuchung aus - kein Warten auf Wiederholung, im Gegensatz zu
+# deviation-detector-service (statistische Abweichung ueber Zeit).
+# Testet context-severity-detector-service.
 #
-# Startet den kompletten Stack sauber (down + gezieltes Leeren von
-# Postgres/Qdrant, ollama-data bleibt erhalten), reicht die Deployment-
-# Benachrichtigung (Kontext) sowie Baseline- und Spike-Werte fuer
-# api_error_rate per HTTP ein, wartet auf und zeigt das Investigation-
-# Ergebnis.
+# Reicht zwei Kontext-Nachrichten unterschiedlicher Dringlichkeit ein:
+# "Login nicht moeglich" (hoch, sollte eine Anomalie ausloesen) und
+# "Seitenaufbau teilweise langsam" (niedrig, sollte KEINE Anomalie
+# ausloesen - waere Aufgabe eines spaeteren Volumen-basierten Detectors).
+#
+# Deckt bewusst nur den Severity-Weg ab, nicht das vollstaendige
+# Healthcare-Szenario (Text-Anomalie <- Text-Ursache) - dafuer fehlt noch
+# der Volumen-Detector sowie eine passende Ursache-Datenquelle.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -22,9 +24,9 @@ POLL_TIMEOUT_SECONDS=210
 STACK_READY_TIMEOUT_SECONDS=180
 CONSUMER_READY_TIMEOUT_SECONDS=60
 
-CONSUMER_QUEUES="sezra.queue.ingestion-service sezra.queue.knowledge-service sezra.queue.vectorizing-service sezra.queue.deviation-detector-service sezra.queue.persistence-service sezra.queue.analyzer-service"
+CONSUMER_QUEUES="sezra.queue.ingestion-service sezra.queue.knowledge-service sezra.queue.vectorizing-service sezra.queue.deviation-detector-service sezra.queue.persistence-service sezra.queue.analyzer-service sezra.queue.context-severity-detector-service"
 
-STACK_SERVICES="rabbitmq postgres ollama-model-pull qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service"
+STACK_SERVICES="rabbitmq postgres ollama-model-pull qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service context-severity-detector-service"
 
 if [ ! -f "docker-compose.yml" ]; then
   echo "Fehler: docker-compose.yml nicht gefunden. Im Repo-Root ausfuehren."
@@ -48,11 +50,12 @@ if [ -z "$RABBITMQ_USER" ] || [ -z "$RABBITMQ_PASSWORD" ]; then
   exit 1
 fi
 
-echo "=== SEZRA Demo: DevOps Scenario (Metrik <- Text) ==="
+echo "=== SEZRA Demo: Severity Scenario (einzelne Nachricht loest sofort aus) ==="
 echo ""
 
 echo "0/4 Stack wird neu gestartet (down + up --build)..."
-echo "    Hinweis: ollama-data bleibt erhalten (kein erneuter Modell-Download)."
+echo "    Hinweis: Ollama laeuft nativ (nicht in Docker), ollama-model-pull"
+echo "    erreicht es ueber host.docker.internal."
 docker compose down > /dev/null 2>&1 || true
 docker compose up --build -d $STACK_SERVICES
 
@@ -156,30 +159,18 @@ curl -s -X POST "http://localhost:6333/collections/sezra_semantic/points/delete"
 
 echo ""
 
-post_observation() {
-  curl -s -X POST "$API_URL/observations" \
-    -H "Content-Type: application/json" \
-    -d "$1" > /dev/null
-}
-
 post_context() {
   curl -s -X POST "$API_URL/context" \
     -H "Content-Type: application/json" \
     -d "$1" > /dev/null
 }
 
-echo "1/4 Deployment-Benachrichtigung (Kontext) wird eingereicht..."
-post_context '{"sender": "ci-cd@internal.tools", "subject": "Deployment v2.4.1", "text": "Version 2.4.1 wurde um 14:00 Uhr live geschaltet, enthaelt Aenderungen am Payment-Modul."}'
-sleep 5
+echo "1/2 Geringfuegige Beschwerde wird eingereicht (sollte KEINE Anomalie ausloesen)..."
+post_context '{"sender": "user1@example.com", "subject": "Feedback", "text": "Seitenaufbau teilweise langsam"}'
+sleep 8
 
-echo "2/4 Baseline: api_error_rate (stabil, ~0.6%)..."
-for value in 0.5 0.7 0.6 0.8 0.6; do
-  post_observation "{\"metric\": \"api_error_rate\", \"value\": $value}"
-  sleep 3
-done
-
-echo "3/4 Fehlerrate-Spike (Anomalie)..."
-post_observation '{"metric": "api_error_rate", "value": 12.4}'
+echo "2/2 Kritische Beschwerde wird eingereicht (sollte SOFORT eine Anomalie ausloesen)..."
+post_context '{"sender": "user2@example.com", "subject": "Login-Problem", "text": "Login nicht moeglich, Weiterleitung auf Fehlerseite"}'
 
 echo ""
 echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -201,9 +192,15 @@ done
 echo ""
 if [ -z "$result" ]; then
   echo "Kein Investigation-Ergebnis innerhalb von ${POLL_TIMEOUT_SECONDS}s gefunden."
-  echo "Pruefe manuell: docker compose logs deviation-detector-service analyzer-service"
+  echo "Erwartet, wenn die geringfuegige Beschwerde (0.2) korrekt KEINE Anomalie"
+  echo "ausgeloest hat, aber die kritische (Login) auch nicht ankam - pruefe:"
+  echo "docker compose logs context-severity-detector-service analyzer-service"
   exit 1
 fi
 
 echo "=== Investigation-Ergebnis ==="
 echo "$result" | python3 -m json.tool
+
+echo ""
+echo "=== Severity-Bewertungen (zur Kontrolle) ==="
+docker compose logs context-severity-detector-service 2>/dev/null | grep -i "severity\|detected" | tail -5

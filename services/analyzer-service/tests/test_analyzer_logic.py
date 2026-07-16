@@ -569,6 +569,35 @@ class TestBuildInvestigationPayload:
         assert "78" in result["anomaly_summary"]
         assert "45" in result["anomaly_summary"]
 
+    def test_severity_anomaly_summary_does_not_show_none(self):
+        """
+        Regressionstest: eine Severity-Anomalie (kein "metric"-Feld)
+        erzeugte vorher "None changed from None to None (severity)" -
+        gefunden im ersten Live-Test mit context-severity-detector-
+        service.
+        """
+        severity_envelope = {
+            "schema_version": "1.1",
+            "event_id": "6f9c2b1a-4e3a-4a3a-9c1a-2b1a4e3a4a3a",
+            "event_type": "AnomalyDetected",
+            "source": "context-severity-detector-service",
+            "occurred_at": "2026-07-16T14:00:00Z",
+            "project_id": "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a",
+            "payload": {
+                "anomaly_type": "severity",
+                "severity_score": 1.0,
+                "text": "Login nicht moeglich",
+                "reason": "single message rated highly urgent",
+                "source_event_id": "ctx-event-id",
+                "source_occurred_at": "2026-07-16T13:59:00Z",
+            },
+        }
+
+        result = build_investigation_payload(severity_envelope, [])
+
+        assert "None" not in result["anomaly_summary"]
+        assert "Login nicht moeglich" in result["anomaly_summary"]
+
 
 class TestCreateInvestigationEvent:
     def test_causation_id_points_to_anomaly_event(self):
