@@ -132,13 +132,18 @@ def build_anomaly_search_text(payload: dict) -> str:
     Domaenenagnostisch: kein Wissen ueber bestimmte Metrik-Namen, nur
     generische Satzbausteine aus den vorhandenen Feldern.
     """
+    text = payload.get("text")
     metric = payload.get("metric")
     anomaly_type = payload.get("anomaly_type", "change")
     previous_value = payload.get("previous_value")
     current_value = payload.get("current_value")
     reason = payload.get("reason", "")
 
-    if metric and previous_value is not None and current_value is not None:
+    if text:
+        # Severity-Anomalie (context-severity-detector-service): der
+        # gemeldete Text selbst ist der Suchgegenstand, keine Metrik.
+        sentence = f"A message was flagged as highly urgent or severe: \"{text}\""
+    elif metric and previous_value is not None and current_value is not None:
         sentence = (
             f"The metric {metric} showed a significant {anomaly_type}, "
             f"changing from {previous_value} to {current_value}."
@@ -300,22 +305,33 @@ def search_related_context(
     project_id: str | None,
     anomaly_occurred_at: str,
     anomaly_composite_key: str | None,
+    anomaly_source_event_id: str | None,
 ) -> list[dict]:
     """
     Sucht die naechsten Nachbarn in Qdrant, gefiltert nach project_id
     (Isolation zwischen Einsatzszenarien), zeitlich VOR der Anomalie
     (Kausalitaets-Plausibilitaet: eine Ursache kann nicht nach ihrer
-    Wirkung liegen), und schliesst Kandidaten mit demselben composite_key
-    wie die Anomalie selbst aus (eine Beobachtungsreihe kann sich nicht
-    selbst erklaeren - "math_test_average war neulich auch mal 79" ist
-    keine Ursache fuer "math_test_average ist jetzt 45", das ist nur ein
-    weiterer Messpunkt derselben Reihe). Eine ANDERE Metrik-Reihe oder ein
-    Kontext-Event (composite_key ist dort None) bleibt weiterhin ein
-    legitimer Kandidat.
+    Wirkung liegen), und schliesst zwei Arten von Selbstbezug aus:
 
-    Zeit- und composite_key-Filter passieren client-seitig in Python,
-    nicht als Qdrant-Filter - einfacher zu lesen und zu testen als
-    Qdrant-Filter auf nicht dafuer indizierten Feldern.
+    1. Kandidaten mit demselben composite_key wie die Anomalie selbst
+       (eine Beobachtungsreihe kann sich nicht selbst erklaeren -
+       "math_test_average war neulich auch mal 79" ist keine Ursache
+       fuer "math_test_average ist jetzt 45", das ist nur ein weiterer
+       Messpunkt derselben Reihe).
+    2. Den urspruenglichen Event, der die Anomalie ausgeloest hat
+       (anomaly_source_event_id) - relevant vor allem bei
+       Severity-Anomalien (context-severity-detector-service): die
+       gemeldete Beschwerde wird sowohl als ContextIngested als auch als
+       Teil der resultierenden AnomalyDetected-Payload vektorisiert -
+       ohne diesen Ausschluss koennte die Original-Nachricht als
+       "Ursache" ihrer eigenen Anomalie-Meldung erscheinen.
+
+    Eine ANDERE Metrik-Reihe oder ein unabhaengiges Kontext-Event bleibt
+    weiterhin ein legitimer Kandidat.
+
+    Zeit-, composite_key- und Selbstbezugs-Filter passieren client-seitig
+    in Python, nicht als Qdrant-Filter - einfacher zu lesen und zu testen
+    als Qdrant-Filter auf nicht dafuer indizierten Feldern.
     """
     query_filter = Filter(
         must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
@@ -332,6 +348,7 @@ def search_related_context(
     for point in response.points:
         candidate_occurred_at = point.payload.get("occurred_at")
         candidate_composite_key = point.payload.get("composite_key")
+        candidate_event_id = point.payload.get("event_id")
 
         occurred_before_anomaly = (
             candidate_occurred_at is not None and candidate_occurred_at < anomaly_occurred_at
@@ -340,8 +357,12 @@ def search_related_context(
             anomaly_composite_key is not None
             and candidate_composite_key == anomaly_composite_key
         )
+        is_the_triggering_event_itself = (
+            anomaly_source_event_id is not None
+            and candidate_event_id == anomaly_source_event_id
+        )
 
-        if is_same_series_as_anomaly:
+        if is_same_series_as_anomaly or is_the_triggering_event_itself:
             continue
 
         candidates.append(
@@ -455,6 +476,7 @@ def handle_message(channel, method, properties, body: bytes, qdrant_client: Qdra
     payload = envelope["payload"]
     anomaly_occurred_at = payload.get("source_occurred_at", envelope["occurred_at"])
     anomaly_composite_key = payload.get("composite_key")
+    anomaly_source_event_id = payload.get("source_event_id")
     search_text = build_anomaly_search_text(payload)
 
     try:
@@ -465,7 +487,8 @@ def handle_message(channel, method, properties, body: bytes, qdrant_client: Qdra
 
     try:
         candidates = search_related_context(
-            qdrant_client, vector, envelope.get("project_id"), anomaly_occurred_at, anomaly_composite_key
+            qdrant_client, vector, envelope.get("project_id"), anomaly_occurred_at,
+            anomaly_composite_key, anomaly_source_event_id,
         )
     except Exception as error:
         print(f"[{SERVICE_NAME}] Qdrant error, will retry: {error}")

@@ -133,6 +133,20 @@ class TestBuildAnomalySearchText:
         assert "78" in text
         assert "45" in text
 
+    def test_severity_anomaly_uses_text_field_directly(self):
+        """
+        Regressionstest: eine Severity-Anomalie (context-severity-
+        detector-service) hat kein "metric"-Feld, sondern "text" - ohne
+        diesen Fall wuerde die Funktion in den generischen Fallback
+        ("An anomaly was detected.") fallen und den eigentlichen
+        Beschwerdetext komplett ignorieren.
+        """
+        text = build_anomaly_search_text(
+            {"anomaly_type": "severity", "severity_score": 0.95, "text": "Login nicht moeglich"}
+        )
+
+        assert "Login nicht moeglich" in text
+
     def test_includes_reason(self):
         text = build_anomaly_search_text(ANOMALY_ENVELOPE["payload"])
 
@@ -147,7 +161,7 @@ class TestSearchRelatedContext:
         )
 
         results = search_related_context(
-            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None
+            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None, None
         )
 
         assert len(results) == 1
@@ -165,7 +179,7 @@ class TestSearchRelatedContext:
         )
 
         results = search_related_context(
-            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None
+            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None, None
         )
 
         assert results == []
@@ -180,7 +194,7 @@ class TestSearchRelatedContext:
         )
 
         results = search_related_context(
-            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None
+            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None, None
         )
 
         assert len(results) == 1
@@ -190,7 +204,7 @@ class TestSearchRelatedContext:
         client = MagicMock()
         client.query_points.return_value = SimpleNamespace(points=[])
 
-        search_related_context(client, [0.1] * 768, "some-project-id", "2026-07-11T08:00:00Z", None)
+        search_related_context(client, [0.1] * 768, "some-project-id", "2026-07-11T08:00:00Z", None, None)
 
         call_kwargs = client.query_points.call_args.kwargs
         assert call_kwargs["query_filter"] is not None
@@ -217,7 +231,7 @@ class TestSearchRelatedContext:
 
         results = search_related_context(
             client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z",
-            "math_test_average|period=1",
+            "math_test_average|period=1", None,
         )
 
         assert len(results) == 1
@@ -241,10 +255,41 @@ class TestSearchRelatedContext:
 
         results = search_related_context(
             client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z",
-            "math_test_average|period=1",
+            "math_test_average|period=1", None,
         )
 
         assert len(results) == 1
+
+    def test_triggering_event_excludes_itself_as_cause(self):
+        """
+        Der Kern des Selbstbezugs-Fixes: die Original-Nachricht, die eine
+        Severity-Anomalie ausgeloest hat (context-severity-detector-
+        service), wird sowohl als ContextIngested als auch als Teil der
+        AnomalyDetected-Payload vektorisiert - ohne diesen Ausschluss
+        koennte sie als "Ursache" ihrer eigenen Anomalie-Meldung
+        erscheinen.
+        """
+        client = MagicMock()
+        client.query_points.return_value = SimpleNamespace(
+            points=[
+                make_point(
+                    0.99, "die urspruengliche Beschwerde selbst", "2026-07-04T06:00:00Z",
+                    event_id="original-complaint-id",
+                ),
+                make_point(
+                    0.6, "eine andere, unabhaengige Mail", "2026-07-04T06:00:00Z",
+                    event_id="unrelated-email",
+                ),
+            ]
+        )
+
+        results = search_related_context(
+            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z",
+            None, "original-complaint-id",
+        )
+
+        assert len(results) == 1
+        assert results[0]["source_event_id"] == "unrelated-email"
 
     def test_results_sorted_by_confidence_descending(self):
         client = MagicMock()
@@ -256,7 +301,7 @@ class TestSearchRelatedContext:
         )
 
         results = search_related_context(
-            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None
+            client, [0.1] * 768, ANOMALY_ENVELOPE["project_id"], "2026-07-11T08:00:00Z", None, None
         )
 
         assert results[0]["source_event_id"] == "b"

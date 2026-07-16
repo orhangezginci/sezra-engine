@@ -39,29 +39,18 @@ services:
       timeout: 5s
       retries: 10
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"  # nur fuer lokale Entwicklung/Debugging
-    volumes:
-      - ollama-data:/root/.ollama
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   ollama-model-pull:
     build:
       context: .
       dockerfile: infra/ollama-model-pull/Dockerfile
-    depends_on:
-      ollama:
-        condition: service_healthy
     environment:
-      OLLAMA_HOST: ollama
+      # macOS Docker Desktop: host.docker.internal erreicht den nativen
+      # Ollama-Prozess auf dem Host, kein eigener Container mehr noetig.
+      # Voraussetzung: Ollama muss an 0.0.0.0 binden, nicht nur
+      # localhost (siehe launchctl setenv OLLAMA_HOST "0.0.0.0").
+      OLLAMA_HOST: host.docker.internal
       OLLAMA_PORT: 11434
-      OLLAMA_MODELS_TO_PULL: "nomic-embed-text,qwen2.5:3b"
+      OLLAMA_MODELS_TO_PULL: "nomic-embed-text,gemma4"
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -173,7 +162,7 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
-      OLLAMA_HOST: ollama
+      OLLAMA_HOST: host.docker.internal
       OLLAMA_PORT: 11434
       OLLAMA_EMBEDDING_MODEL: nomic-embed-text
 
@@ -211,11 +200,11 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
-      OLLAMA_HOST: ollama
+      OLLAMA_HOST: host.docker.internal
       OLLAMA_PORT: 11434
       OLLAMA_EMBEDDING_MODEL: nomic-embed-text
       LLM_PROVIDER: ${LLM_PROVIDER}
-      OLLAMA_GENERATION_MODEL: qwen2.5:3b
+      OLLAMA_GENERATION_MODEL: gemma4
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_GENERATION_MODEL: ${OPENAI_GENERATION_MODEL}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL}
@@ -249,7 +238,31 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       SEZRA_PROJECT_ID: ${SEZRA_PROJECT_ID}
 
+  context-severity-detector-service:
+    build:
+      context: .
+      dockerfile: services/context-severity-detector-service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      OLLAMA_HOST: host.docker.internal
+      OLLAMA_PORT: 11434
+      OLLAMA_GENERATION_MODEL: gemma4
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_GENERATION_MODEL: ${OPENAI_GENERATION_MODEL}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_GENERATION_MODEL: ${GEMINI_GENERATION_MODEL}
+      SEVERITY_THRESHOLD: 0.8
+
 volumes:
   postgres-data:
-  ollama-data:
   qdrant-data:
