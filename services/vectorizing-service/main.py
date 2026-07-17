@@ -179,7 +179,19 @@ def write_to_qdrant(qdrant_client: QdrantClient, envelope: dict, vector: list[fl
                 id=str(uuid4()),
                 vector=vector,
                 payload={
-                    "event_id": envelope["event_id"],
+                    # source_event_id (Payload-Konvention, wie
+                    # source_occurred_at) ist die ID des URSPRUENGLICHEN
+                    # Events (z. B. das AnomalyDetected/ContextIngested,
+                    # bevor knowledge-service es angereichert hat) -
+                    # envelope["event_id"] ist nur die frisch generierte
+                    # ID des Anreicherungs-Wrappers selbst, nutzlos fuer
+                    # Kreuzverweise (Selbstbezug-Ausschluss, "diese
+                    # Anomalie wurde bereits anderswo als Ursache
+                    # gefunden") - genau derselbe Bug-Typ wie beim
+                    # occurred_at-Fix, nur bei der Identitaet statt der
+                    # Zeit uebersehen. Fallback auf envelope["event_id"]
+                    # fuer Envelopes ohne diese Konvention.
+                    "event_id": payload.get("source_event_id", envelope["event_id"]),
                     "project_id": envelope.get("project_id"),
                     "event_type": envelope["event_type"],
                     "source": envelope["source"],

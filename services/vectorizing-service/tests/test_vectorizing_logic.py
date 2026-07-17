@@ -69,6 +69,7 @@ VALID_ENVELOPE = {
         "value": 42,
         "semantic_text": "metric: test; value: 42",
         "source_occurred_at": "2026-07-05T09:58:00Z",
+        "source_event_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     },
 }
 
@@ -180,9 +181,38 @@ class TestWriteToQdrant:
         assert call_kwargs["collection_name"] == QDRANT_COLLECTION_NAME
         point = call_kwargs["points"][0]
         assert point.vector == FAKE_VECTOR
-        assert point.payload["event_id"] == VALID_ENVELOPE["event_id"]
+        assert point.payload["event_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"  # source_event_id, nicht der Wrapper selbst
         assert point.payload["project_id"] == VALID_ENVELOPE["project_id"]
         assert point.payload["occurred_at"] == "2026-07-05T09:58:00Z"  # source_occurred_at, nicht envelope occurred_at
+
+    def test_falls_back_to_envelope_event_id_when_source_event_id_missing(self):
+        """
+        Regressionstest: ohne diesen Fallback (und ohne den urspruenglichen
+        Bug ueberhaupt zu fixen) landete envelope["event_id"] (die frisch
+        generierte ID des Anreicherungs-Wrappers) in Qdrant statt der
+        Original-Event-ID - dadurch griff der Selbstbezugs-Ausschluss im
+        Analyzer nie, und Kreuzverweise zwischen Investigations
+        (checkout_error_rate als Ursache fuer conversion_rate) wurden
+        nie erkannt, weil die IDs nie uebereinstimmten.
+        """
+        client = MagicMock()
+        envelope = dict(VALID_ENVELOPE)
+        envelope["payload"] = {"metric": "test", "value": 42, "semantic_text": "text"}
+
+        write_to_qdrant(client, envelope, FAKE_VECTOR)
+
+        point = client.upsert.call_args.kwargs["points"][0]
+        assert point.payload["event_id"] == VALID_ENVELOPE["event_id"]
+
+    def test_falls_back_to_envelope_occurred_at_when_source_occurred_at_missing(self):
+        client = MagicMock()
+        envelope = dict(VALID_ENVELOPE)
+        envelope["payload"] = {"metric": "test", "value": 42, "semantic_text": "text"}
+
+        write_to_qdrant(client, envelope, FAKE_VECTOR)
+
+        point = client.upsert.call_args.kwargs["points"][0]
+        assert point.payload["occurred_at"] == VALID_ENVELOPE["occurred_at"]
         assert point.payload["semantic_text"] == "metric: test; value: 42"
 
     def test_composite_key_is_included_for_observations(self):

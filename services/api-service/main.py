@@ -168,34 +168,81 @@ def post_context(raw_data: dict):
 @app.get("/investigations")
 def get_investigations(limit: int = 20):
     """
-    Investigations mit gefundenen Ursachen erscheinen zuerst, "keine
-    Ursache gefunden"-Ergebnisse (leere possible_causes) nachrangig.
-    Aendert nichts an der Analyzer-Logik selbst - ein leeres Ergebnis
-    bleibt ehrlich sichtbar, wird nur nicht mehr gleichrangig mit
-    erfolgreichen Investigations vermischt (sonst muss der Nutzer
-    zwischen mehreren Eintraegen suchen, um das eigentlich interessante
-    Ergebnis zu finden - fuer ein Demo/Studio-Erlebnis inakzeptabel).
+    Drei Prioritaetsstufen statt nur "Ursache gefunden vs. nicht":
+
+    1. Eigene Ursache gefunden - hoechste Prioritaet.
+    2. Echtes ungeloestes Raetsel - keine Ursache gefunden, UND diese
+       Anomalie erklaert selbst auch nirgendwo sonst etwas.
+    3. Anderswo bereits erklaert - keine eigene Ursache, ABER diese
+       Anomalie wurde selbst als Ursache einer ANDEREN Investigation
+       identifiziert - niedrigste Prioritaet, aber sichtbar (nicht
+       versteckt), mit Verweis auf die erklaerende Investigation.
+
+    Ohne Stufe 3 erschien z. B. im E-Commerce-Szenario ein
+    checkout_error_rate-Spike als eigenstaendiges, ungeloestes Raetsel,
+    obwohl er bereits korrekt als Ursache fuer den conversion_rate-Abfall
+    gefunden wurde - fuer den Nutzer wirkte das wie ein Ratespiel
+    zwischen zwei gleichrangigen Ergebnissen, obwohl SEZRA die
+    Verbindung laengst kannte. Kreuzverweis passiert rein lesend, ohne
+    dass deviation-detector-service oder analyzer-service voneinander
+    wissen muessen - haelt die Services entkoppelt.
+
+    Holt grosszuegig mehr Zeilen als angefordert (Kreuzverweis-Analyse
+    braucht den vollen Kontext, nicht nur die ersten `limit` Zeilen -
+    sonst koennte die erklaerende Investigation ausserhalb der
+    betrachteten Seite liegen und uebersehen werden), sortiert dann in
+    Python nach den drei Stufen und schneidet erst danach auf `limit` zu.
     """
     connection = connect_to_postgres()
     try:
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT event_id, correlation_id, occurred_at, received_at,
-                       project_id, payload
+                SELECT event_id, correlation_id, causation_id, occurred_at,
+                       received_at, project_id, payload
                 FROM events
                 WHERE event_type = 'InvestigationGenerated'
-                ORDER BY jsonb_array_length(payload->'possible_causes') DESC,
-                         received_at DESC
-                LIMIT %s
+                ORDER BY received_at DESC
+                LIMIT 500
                 """,
-                (limit,),
             )
             rows = cursor.fetchall()
     finally:
         connection.close()
 
-    return JSONResponse(content=json.loads(json.dumps(rows, default=str)))
+    # Wer erklaert wen: source_event_id (aus jeder possible_cause) ->
+    # event_id der Investigation, die diese Ursache gefunden hat.
+    explained_by: dict[str, str] = {}
+    for row in rows:
+        for cause in row["payload"].get("possible_causes", []):
+            source_event_id = cause.get("source_event_id")
+            if source_event_id:
+                explained_by[source_event_id] = row["event_id"]
+
+    def tier(row: dict) -> int:
+        has_own_causes = bool(row["payload"].get("possible_causes"))
+        if has_own_causes:
+            return 0
+        causation_id = str(row["causation_id"]) if row["causation_id"] else None
+        if causation_id and causation_id in explained_by:
+            return 2
+        return 1
+
+    for row in rows:
+        causation_id = str(row["causation_id"]) if row["causation_id"] else None
+        explaining_investigation_id = explained_by.get(causation_id) if causation_id else None
+        row["explained_elsewhere"] = explaining_investigation_id is not None
+        row["explained_by_investigation_event_id"] = explaining_investigation_id
+
+    # Pythons sort() ist stabil: zuerst nach Zeitpunkt sortieren (neueste
+    # zuerst), danach nach Stufe (0 zuerst) - das Ergebnis ist "Stufe
+    # aufsteigend, innerhalb einer Stufe neueste zuerst", ohne dass eine
+    # einzelne sort()-Anweisung zwei unterschiedliche Richtungen
+    # gleichzeitig braucht.
+    rows.sort(key=lambda row: row["received_at"], reverse=True)
+    rows.sort(key=tier)
+
+    return JSONResponse(content=json.loads(json.dumps(rows[:limit], default=str)))
 
 
 @app.get("/investigations/{event_id}")

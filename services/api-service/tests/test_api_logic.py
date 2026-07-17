@@ -135,7 +135,13 @@ class TestGetEndpoints:
     def test_get_investigations_returns_rows(self, monkeypatch):
         fake_cursor = MagicMock()
         fake_cursor.fetchall.return_value = [
-            {"event_id": "abc", "occurred_at": "2026-01-01T00:00:00Z", "payload": {"anomaly_summary": "x"}}
+            {
+                "event_id": "abc",
+                "causation_id": "anomaly-1",
+                "occurred_at": "2026-01-01T00:00:00Z",
+                "received_at": "2026-01-01T00:00:01Z",
+                "payload": {"anomaly_summary": "x"},
+            }
         ]
         fake_cursor.__enter__ = lambda self: fake_cursor
         fake_cursor.__exit__ = lambda self, *a: None
@@ -149,7 +155,7 @@ class TestGetEndpoints:
 
         assert response.status_code == 200
 
-    def test_get_investigations_prioritizes_results_with_causes(self, monkeypatch):
+    def test_get_investigations_prioritizes_results_with_own_causes(self, monkeypatch):
         """
         Regressionstest: Investigations mit gefundenen Ursachen muessen
         VOR "keine Ursache gefunden"-Ergebnissen stehen, sonst muss der
@@ -157,7 +163,20 @@ class TestGetEndpoints:
         um das eigentlich interessante Ergebnis zu finden.
         """
         fake_cursor = MagicMock()
-        fake_cursor.fetchall.return_value = []
+        fake_cursor.fetchall.return_value = [
+            {
+                "event_id": "no-cause-investigation",
+                "causation_id": "anomaly-a",
+                "received_at": "2026-07-17T10:00:00Z",
+                "payload": {"possible_causes": []},
+            },
+            {
+                "event_id": "has-cause-investigation",
+                "causation_id": "anomaly-b",
+                "received_at": "2026-07-17T09:00:00Z",  # aelter, muesste trotzdem vorne stehen
+                "payload": {"possible_causes": [{"source_event_id": "some-context-event"}]},
+            },
+        ]
         fake_cursor.__enter__ = lambda self: fake_cursor
         fake_cursor.__exit__ = lambda self, *a: None
 
@@ -166,10 +185,100 @@ class TestGetEndpoints:
         monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
 
         client = TestClient(app)
-        client.get("/investigations")
+        response = client.get("/investigations")
 
-        query = fake_cursor.execute.call_args[0][0]
-        assert "jsonb_array_length(payload->'possible_causes') DESC" in query
+        results = response.json()
+        assert results[0]["event_id"] == "has-cause-investigation"
+        assert results[1]["event_id"] == "no-cause-investigation"
+
+    def test_get_investigations_deprioritizes_results_explained_elsewhere(self, monkeypatch):
+        """
+        Der Kern des Kreuzverweis-Fixes: eine Anomalie ohne eigene
+        Ursache, die aber SELBST als Ursache einer anderen Investigation
+        gefunden wurde (z. B. checkout_error_rate als Ursache fuer
+        conversion_rate), soll nicht gleichrangig mit einem echten,
+        ungeloesten Raetsel erscheinen - sie ist ja bereits erklaert,
+        nur als Erklaerung fuer etwas anderes.
+        """
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = [
+            {
+                "event_id": "genuine-mystery",
+                "causation_id": "anomaly-x",
+                "received_at": "2026-07-17T08:00:00Z",
+                "payload": {"possible_causes": []},
+            },
+            {
+                "event_id": "explained-elsewhere-investigation",
+                "causation_id": "checkout-error-anomaly-event-id",
+                "received_at": "2026-07-17T09:00:00Z",  # neuer, muesste trotzdem hinten stehen
+                "payload": {"possible_causes": []},
+            },
+            {
+                "event_id": "conversion-rate-investigation",
+                "causation_id": "conversion-rate-anomaly-event-id",
+                "received_at": "2026-07-17T10:00:00Z",
+                "payload": {
+                    "possible_causes": [
+                        {"source_event_id": "checkout-error-anomaly-event-id"}
+                    ]
+                },
+            },
+        ]
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/investigations")
+
+        results = response.json()
+        ids_in_order = [r["event_id"] for r in results]
+
+        assert ids_in_order[0] == "conversion-rate-investigation"  # eigene Ursache
+        assert ids_in_order[1] == "genuine-mystery"  # echtes Raetsel
+        assert ids_in_order[2] == "explained-elsewhere-investigation"  # anderswo erklaert
+
+    def test_explained_elsewhere_investigation_is_marked(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = [
+            {
+                "event_id": "explained-elsewhere-investigation",
+                "causation_id": "checkout-error-anomaly-event-id",
+                "received_at": "2026-07-17T09:00:00Z",
+                "payload": {"possible_causes": []},
+            },
+            {
+                "event_id": "conversion-rate-investigation",
+                "causation_id": "conversion-rate-anomaly-event-id",
+                "received_at": "2026-07-17T10:00:00Z",
+                "payload": {
+                    "possible_causes": [
+                        {"source_event_id": "checkout-error-anomaly-event-id"}
+                    ]
+                },
+            },
+        ]
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        results = client.get("/investigations").json()
+
+        explained = next(r for r in results if r["event_id"] == "explained-elsewhere-investigation")
+        assert explained["explained_elsewhere"] is True
+        assert explained["explained_by_investigation_event_id"] == "conversion-rate-investigation"
+
+        not_explained = next(r for r in results if r["event_id"] == "conversion-rate-investigation")
+        assert not_explained["explained_elsewhere"] is False
+        assert not_explained["explained_by_investigation_event_id"] is None
 
     def test_get_investigation_by_id_not_found_returns_404(self, monkeypatch):
         fake_cursor = MagicMock()
@@ -252,7 +361,9 @@ class TestGetEndpoints:
             {
                 "event_id": "abc",
                 "correlation_id": "corr-1",
+                "causation_id": "anomaly-1",
                 "occurred_at": "2026-01-01T00:00:00Z",
+                "received_at": "2026-01-01T00:00:01Z",
                 "payload": {"anomaly_summary": "x"},
             }
         ]
