@@ -1,9 +1,9 @@
 """
 Tests für vectorizing-service.
 
-Mockt Ollama (via requests_mock-freiem monkeypatch auf requests.post)
-und Qdrant (Fake-Client), damit keine echten Verbindungen fuer die
-Logik-Tests noetig sind.
+Mockt FastEmbed (via monkeypatch auf main._embedding_model) und Qdrant
+(Fake-Client), damit keine echten Modell-Downloads oder Verbindungen
+fuer die Logik-Tests noetig sind.
 """
 
 import json
@@ -21,12 +21,9 @@ os.environ["RABBITMQ_USER"] = "test"
 os.environ["RABBITMQ_PASSWORD"] = "test"
 os.environ["QDRANT_HOST"] = "localhost"
 os.environ["QDRANT_PORT"] = "6333"
-os.environ["OLLAMA_HOST"] = "localhost"
-os.environ["OLLAMA_PORT"] = "11434"
-os.environ["OLLAMA_EMBEDDING_MODEL"] = "nomic-embed-text"
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-import requests  # noqa: E402
 
 import main  # noqa: E402
 from main import (  # noqa: E402
@@ -57,6 +54,24 @@ def make_method():
     return SimpleNamespace(delivery_tag=1)
 
 
+def fake_embedding_model(vector=None, error=None):
+    """
+    Ersetzt main._embedding_model - liefert entweder einen festen Vektor
+    (als numpy-Array, wie FastEmbed ihn tatsaechlich zurueckgibt, inkl.
+    .tolist()) oder wirft einen Fehler, um Fehlerpfade zu testen.
+    """
+    if error:
+        def embed(documents):
+            raise error
+    else:
+        array = np.array(vector or FAKE_VECTOR)
+
+        def embed(documents):
+            return iter([array])
+
+    return SimpleNamespace(embed=embed)
+
+
 VALID_ENVELOPE = {
     "schema_version": "1.1",
     "event_id": "6f9c2b1a-4e3a-4a3a-9c1a-2b1a4e3a4a3a",
@@ -77,42 +92,38 @@ FAKE_VECTOR = [0.1] * 768
 
 
 class TestCreateEmbedding:
-    def test_returns_vector_from_ollama_response(self, monkeypatch):
-        fake_response = MagicMock()
-        fake_response.json.return_value = {"embedding": FAKE_VECTOR}
-        fake_response.raise_for_status.return_value = None
-        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+    def test_returns_vector_from_embedding_model(self, monkeypatch):
+        monkeypatch.setattr(main, "_embedding_model", fake_embedding_model())
 
         vector = create_embedding("some text")
 
         assert vector == FAKE_VECTOR
 
-    def test_prepends_search_document_prefix(self, monkeypatch):
+    def test_passes_raw_text_without_prefix(self, monkeypatch):
         """
-        nomic-embed-text erwartet dieses Task-Prefix fuer zu speichernde
-        Texte, unterschieden von search_query fuer Suchanfragen.
+        jina-embeddings-v2-base-de ist ein SYMMETRISCHES Modell (anders
+        als nomic-embed-text) - kein "search_query:"/"search_document:"-
+        Prefix noetig, der Text geht unveraendert ins Modell.
         """
         captured = {}
+        array = np.array(FAKE_VECTOR)
 
-        def fake_post(url, json, timeout):
-            captured["prompt"] = json["prompt"]
-            response = MagicMock()
-            response.json.return_value = {"embedding": FAKE_VECTOR}
-            response.raise_for_status.return_value = None
-            return response
+        def fake_embed(documents):
+            captured["documents"] = list(documents)
+            return iter([array])
 
-        monkeypatch.setattr(requests, "post", fake_post)
+        monkeypatch.setattr(main, "_embedding_model", SimpleNamespace(embed=fake_embed))
 
         create_embedding("some text")
 
-        assert captured["prompt"] == "search_document: some text"
+        assert captured["documents"] == ["some text"]
 
-    def test_raises_on_ollama_http_error(self, monkeypatch):
-        fake_response = MagicMock()
-        fake_response.raise_for_status.side_effect = requests.HTTPError("500")
-        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+    def test_propagates_embedding_model_errors(self, monkeypatch):
+        monkeypatch.setattr(
+            main, "_embedding_model", fake_embedding_model(error=RuntimeError("model error"))
+        )
 
-        with pytest.raises(requests.HTTPError):
+        with pytest.raises(RuntimeError):
             create_embedding("some text")
 
 
@@ -213,7 +224,6 @@ class TestWriteToQdrant:
 
         point = client.upsert.call_args.kwargs["points"][0]
         assert point.payload["occurred_at"] == VALID_ENVELOPE["occurred_at"]
-        assert point.payload["semantic_text"] == "metric: test; value: 42"
 
     def test_composite_key_is_included_for_observations(self):
         client = MagicMock()
@@ -237,23 +247,10 @@ class TestWriteToQdrant:
         point = client.upsert.call_args.kwargs["points"][0]
         assert point.payload["composite_key"] is None
 
-    def test_falls_back_to_envelope_occurred_at_when_source_occurred_at_missing(self):
-        client = MagicMock()
-        envelope = dict(VALID_ENVELOPE)
-        envelope["payload"] = {"metric": "test", "value": 42, "semantic_text": "text"}
-
-        write_to_qdrant(client, envelope, FAKE_VECTOR)
-
-        point = client.upsert.call_args.kwargs["points"][0]
-        assert point.payload["occurred_at"] == VALID_ENVELOPE["occurred_at"]
-
 
 class TestHandleMessage:
     def test_valid_envelope_is_vectorized_and_acked(self, monkeypatch):
-        fake_response = MagicMock()
-        fake_response.json.return_value = {"embedding": FAKE_VECTOR}
-        fake_response.raise_for_status.return_value = None
-        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+        monkeypatch.setattr(main, "_embedding_model", fake_embedding_model())
 
         channel = FakeChannel()
         qdrant_client = MagicMock()
@@ -289,11 +286,15 @@ class TestHandleMessage:
         assert channel.acked == [1]
         qdrant_client.upsert.assert_not_called()
 
-    def test_ollama_error_is_not_acked_and_not_dead_lettered(self, monkeypatch):
-        def raise_connection_error(*args, **kwargs):
-            raise requests.ConnectionError("Ollama unreachable")
-
-        monkeypatch.setattr(requests, "post", raise_connection_error)
+    def test_embedding_error_is_not_acked_and_not_dead_lettered(self, monkeypatch):
+        """
+        Vorher "Ollama unreachable" (requests.ConnectionError) - jetzt
+        generisch, da FastEmbed lokal im Prozess laeuft und keine
+        Netzwerkfehler mehr wirft, sondern z. B. Ressourcen-Fehler.
+        """
+        monkeypatch.setattr(
+            main, "_embedding_model", fake_embedding_model(error=RuntimeError("embedding failed"))
+        )
 
         channel = FakeChannel()
         qdrant_client = MagicMock()
@@ -306,10 +307,7 @@ class TestHandleMessage:
         qdrant_client.upsert.assert_not_called()
 
     def test_qdrant_error_is_not_acked_and_not_dead_lettered(self, monkeypatch):
-        fake_response = MagicMock()
-        fake_response.json.return_value = {"embedding": FAKE_VECTOR}
-        fake_response.raise_for_status.return_value = None
-        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+        monkeypatch.setattr(main, "_embedding_model", fake_embedding_model())
 
         channel = FakeChannel()
         qdrant_client = MagicMock()

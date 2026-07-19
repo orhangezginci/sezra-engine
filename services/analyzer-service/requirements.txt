@@ -4,3 +4,4 @@ rfc3339-validator==0.1.*
 pytest==8.*
 requests==2.32.*
 qdrant-client==1.11.*
+fastembed==0.4.*

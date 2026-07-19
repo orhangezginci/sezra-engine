@@ -6,14 +6,22 @@ set -e
 # deviation-detector-service (statistische Abweichung ueber Zeit).
 # Testet context-severity-detector-service.
 #
-# Reicht zwei Kontext-Nachrichten unterschiedlicher Dringlichkeit ein:
-# "Login nicht moeglich" (hoch, sollte eine Anomalie ausloesen) und
-# "Seitenaufbau teilweise langsam" (niedrig, sollte KEINE Anomalie
-# ausloesen - waere Aufgabe eines spaeteren Volumen-basierten Detectors).
+# Reicht mehrere Kontext-Nachrichten unterschiedlicher Relevanz ein,
+# BEVOR die kritische Beschwerde kommt - realistischer Testkorpus statt
+# nur einer einzelnen, zufaellig passenden Alternative:
+# - drei klar irrelevante Nachrichten (Rechnungsfrage, Feature-Wunsch,
+#   geringfuegige Beschwerde) - sollen NICHT als Ursache erscheinen
+# - eine echte, plausible Ursache (Wartungsankuendigung Auth-Server) -
+#   sollte tatsaechlich als Top-Kandidat gefunden werden
+# - die kritische Beschwerde selbst ("Login nicht moeglich")
+#
+# Testet damit nicht nur "vermeidet SEZRA eine falsche Antwort", sondern
+# die staerkere Frage: findet SEZRA die richtige Antwort, wenn es echte
+# Auswahl zwischen mehreren, unterschiedlich relevanten Kandidaten gibt?
 #
 # Deckt bewusst nur den Severity-Weg ab, nicht das vollstaendige
 # Healthcare-Szenario (Text-Anomalie <- Text-Ursache) - dafuer fehlt noch
-# der Volumen-Detector sowie eine passende Ursache-Datenquelle.
+# der Volumen-Detector.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -165,11 +173,27 @@ post_context() {
     -d "$1" > /dev/null
 }
 
-echo "1/2 Geringfuegige Beschwerde wird eingereicht (sollte KEINE Anomalie ausloesen)..."
+echo "1/6 Irrelevante Nachricht (Rechnungsfrage) wird eingereicht..."
+post_context '{"sender": "user3@example.com", "subject": "Rechnungsanfrage", "text": "Ich habe eine Frage zu meiner letzten Rechnung."}'
+sleep 5
+
+echo "2/6 Irrelevante Nachricht (Feature-Wunsch) wird eingereicht..."
+post_context '{"sender": "user4@example.com", "subject": "Feature-Wunsch", "text": "Waere schoen, wenn es einen Dark Mode gaebe."}'
+sleep 5
+
+echo "3/6 Geringfuegige Beschwerde wird eingereicht (sollte NICHT als Ursache erscheinen)..."
 post_context '{"sender": "user1@example.com", "subject": "Feedback", "text": "Seitenaufbau teilweise langsam"}'
+sleep 5
+
+echo "4/6 Echte, plausible Ursache wird eingereicht (Wartungsankuendigung)..."
+post_context '{"sender": "ops@internal.tools", "subject": "Wartungsankuendigung", "text": "Der Authentifizierungsserver wird heute von 14:00 bis 14:30 Uhr fuer Wartungsarbeiten kurzzeitig nicht erreichbar sein."}'
+sleep 5
+
+echo "5/6 Weitere irrelevante Nachricht (positives Feedback) wird eingereicht..."
+post_context '{"sender": "user5@example.com", "subject": "Lob", "text": "Tolle neue Funktion, macht wirklich Spass zu nutzen!"}'
 sleep 8
 
-echo "2/2 Kritische Beschwerde wird eingereicht (sollte SOFORT eine Anomalie ausloesen)..."
+echo "6/6 Kritische Beschwerde wird eingereicht (sollte SOFORT eine Anomalie ausloesen)..."
 post_context '{"sender": "user2@example.com", "subject": "Login-Problem", "text": "Login nicht moeglich, Weiterleitung auf Fehlerseite"}'
 
 echo ""
@@ -192,9 +216,7 @@ done
 echo ""
 if [ -z "$result" ]; then
   echo "Kein Investigation-Ergebnis innerhalb von ${POLL_TIMEOUT_SECONDS}s gefunden."
-  echo "Erwartet, wenn die geringfuegige Beschwerde (0.2) korrekt KEINE Anomalie"
-  echo "ausgeloest hat, aber die kritische (Login) auch nicht ankam - pruefe:"
-  echo "docker compose logs context-severity-detector-service analyzer-service"
+  echo "Pruefe: docker compose logs context-severity-detector-service analyzer-service"
   exit 1
 fi
 
@@ -203,4 +225,4 @@ echo "$result" | python3 -m json.tool
 
 echo ""
 echo "=== Severity-Bewertungen (zur Kontrolle) ==="
-docker compose logs context-severity-detector-service 2>/dev/null | grep -i "severity\|detected" | tail -5
+docker compose logs context-severity-detector-service 2>/dev/null | grep -i "severity\|detected" | tail -8

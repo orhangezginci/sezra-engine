@@ -15,6 +15,12 @@ WORKDIR /app
 COPY services/analyzer-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Embedding-Modell beim Image-Build vorab herunterladen (~300MB), damit
+# der Container beim Start nicht jedes Mal neu laden muss - muss
+# identisch zu vectorizing-service sein, sonst sind die Vektoren nicht
+# im selben Raum vergleichbar.
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='jinaai/jina-embeddings-v2-base-de')"
+
 COPY contracts/envelope.schema.json ./contracts/envelope.schema.json
 COPY services/analyzer-service/ .
 

@@ -15,6 +15,12 @@ WORKDIR /app
 COPY services/vectorizing-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Embedding-Modell beim Image-Build vorab herunterladen (~300MB), damit
+# der Container beim Start nicht jedes Mal neu laden muss - analog zum
+# fruehreren ollama-model-pull-Job, nur diesmal in das Image selbst
+# gebacken statt zur Laufzeit gegen einen externen Ollama-Prozess.
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='jinaai/jina-embeddings-v2-base-de')"
+
 COPY contracts/envelope.schema.json ./contracts/envelope.schema.json
 COPY services/vectorizing-service/ .
 

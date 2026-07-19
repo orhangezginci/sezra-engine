@@ -2,20 +2,32 @@
 analyzer-service
 
 Konsumiert von sezra.stream.anomaly, sucht in Qdrant nach semantisch
-verwandtem Kontext (z. B. eine Rektor-Mail), und published eine
-strukturierte Investigation zu sezra.stream.investigation.
+verwandtem Kontext (z. B. eine Rektor-Mail), bewertet die Kandidaten per
+LLM auf tatsaechliche KAUSALE Plausibilitaet (nicht nur thematische
+Naehe), und published eine strukturierte Investigation zu
+sezra.stream.investigation.
 
-Drei bewusste Lehren aus dem urspruenglichen SEZRA-Analyzer, hier von
-Anfang an eingebaut, nicht nachtraeglich geflickt:
+Vier bewusste Lehren aus dem urspruenglichen SEZRA-Analyzer bzw. aus
+spaeterer Live-Erprobung, hier eingebaut statt als bekannte Schwaeche
+hingenommen:
 
 1. Zeitfilter: Kandidaten, die NACH der Anomalie liegen, werden verworfen
    - eine Mail, die nach dem Notenabfall verschickt wurde, kann nicht
    dessen Ursache sein.
-2. Sichtbarer Confidence-Score: der Qdrant-Similarity-Score steht direkt
-   im Ergebnis, nicht versteckt.
+2. Sichtbarer Confidence-Score: im Ergebnis steht direkt, wie plausibel
+   ein Kandidat bewertet wurde, nicht versteckt.
 3. Unsicherheits-Fallback: unterhalb eines Schwellwerts wird ehrlich
    "keine ueberzeugende Erklaerung gefunden" gemeldet, statt schwache
    Treffer als vermeintliche Erklaerung zu praesentieren.
+4. Kausal-Rerank statt reiner Vektor-Aehnlichkeit: Embeddings holen einen
+   groesseren Kandidatenpool (thematische Naehe), ein LLM bewertet
+   anschliessend echte kausale Plausibilitaet und ersetzt den rohen
+   Embedding-Score. Gefunden im Severity-Demo: eine echte Ursache
+   (Wartungsankuendigung, kaum Wortueberschneidung mit "Login nicht
+   moeglich") wurde durchgaengig niedriger bewertet als oberflaechlich
+   aehnlich klingende, aber irrelevante Nachrichten - auch mit einem
+   staerkeren Embedding-Modell. Reine Vektor-Aehnlichkeit misst Thema,
+   nicht Kausalitaet.
 
 Reiner Consumer mit Publish (kein Producer-only, kein Consumer-only):
 konsumiert Anomalien, published strukturierte Investigations.
@@ -29,6 +41,7 @@ from uuid import uuid4
 
 import pika
 import requests
+from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
@@ -46,6 +59,11 @@ QUEUE_NAME = f"sezra.queue.{SERVICE_NAME}"
 QDRANT_COLLECTION_NAME = "sezra_semantic"
 SEARCH_LIMIT = int(os.getenv("ANALYZER_SEARCH_LIMIT", "5"))
 CONFIDENCE_THRESHOLD = float(os.getenv("ANALYZER_CONFIDENCE_THRESHOLD", "0.5"))
+# Groesserer Pool VOR dem Rerank - die embedding-basierte Vorauswahl misst
+# nur thematische Naehe, nicht kausale Plausibilitaet, die tatsaechliche
+# Ursache kann also unter den Top SEARCH_LIMIT nach reinem Embedding-Score
+# fehlen. Der Rerank-Schritt bewertet diesen groesseren Pool neu.
+RERANK_POOL_SIZE = int(os.getenv("ANALYZER_RERANK_POOL_SIZE", "10"))
 
 
 def required_env(name: str) -> str:
@@ -65,13 +83,21 @@ QDRANT_PORT = int(required_env("QDRANT_PORT"))
 
 OLLAMA_HOST = required_env("OLLAMA_HOST")
 OLLAMA_PORT = required_env("OLLAMA_PORT")
-OLLAMA_EMBEDDING_MODEL = required_env("OLLAMA_EMBEDDING_MODEL")
 OLLAMA_GENERATION_MODEL = None
 OPENAI_API_KEY = None
 OPENAI_GENERATION_MODEL = None
 OPENAI_BASE_URL = None
 GEMINI_API_KEY = None
 GEMINI_GENERATION_MODEL = None
+
+# jina-embeddings-v2-base-de ist ein SYMMETRISCHES Modell (anders als
+# nomic-embed-text) - kein "search_query:"/"search_document:"-Prefix
+# noetig, dieselbe Funktion fuer Speichern (vectorizing-service) und
+# Suchen (hier) nutzbar. Laeuft lokal im Prozess (FastEmbed/ONNX),
+# unabhaengig von LLM_PROVIDER - Embeddings bleiben IMMER lokal, das ist
+# eine bewusste Datenschutz-Entscheidung, nicht nur Bequemlichkeit.
+EMBEDDING_MODEL_NAME = "jinaai/jina-embeddings-v2-base-de"
+_embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
 
 # Entscheidet, welcher Anbieter fuer die Textgenerierung (nicht Embeddings -
 # die bleiben immer Ollama, siehe OLLAMA_EMBEDDING_MODEL oben) genutzt wird.
@@ -151,8 +177,15 @@ def build_anomaly_search_text(payload: dict) -> str:
 
     if text:
         # Severity-Anomalie (context-severity-detector-service): der
-        # gemeldete Text selbst ist der Suchgegenstand, keine Metrik.
-        sentence = f"A message was flagged as highly urgent or severe: \"{text}\""
+        # rohe Beschwerdetext wird DIREKT als Suchtext genutzt, ohne
+        # Meta-Umhuellung ("A message was flagged as..."). Der Rahmensatz
+        # verwaesserte die inhaltliche Aehnlichkeit gegenueber den
+        # gespeicherten Kontext-Dokumenten (die selbst kein solches
+        # Meta-Framing tragen) - gefunden, als eine plausible Ursache
+        # (Wartungsankuendigung) niedriger bewertet wurde als mehrere
+        # klar irrelevante Nachrichten, alle in einem einzigen, kaum
+        # unterscheidbaren Score-Band.
+        sentence = text
     elif metric and previous_value is not None and current_value is not None:
         sentence = (
             f"The metric {metric} showed a significant {anomaly_type}, "
@@ -163,7 +196,12 @@ def build_anomaly_search_text(payload: dict) -> str:
     else:
         sentence = "An anomaly was detected."
 
-    if reason:
+    # reason nur bei Metrik-Anomalien anhaengen - bei Severity-Anomalien
+    # ist es reines englisches Boilerplate ("single message was rated
+    # highly urgent..."), das den moeglichst reinen Beschwerdetext
+    # wieder verwaessern wuerde, genau das Problem, das oben behoben
+    # wurde.
+    if reason and not text:
         sentence += f" {reason.capitalize()}."
 
     return sentence
@@ -171,26 +209,13 @@ def build_anomaly_search_text(payload: dict) -> str:
 
 def create_embedding(text: str) -> list[float]:
     """
-    nomic-embed-text erwartet ein Task-Prefix - "search_query:" hier,
-    weil dieser Text eine Suchanfrage gegen die in vectorizing-service
-    mit "search_document:" gespeicherten Vektoren ist. Beide Seiten
-    muessen das jeweils passende Prefix nutzen, sonst sind die Embeddings
-    nicht optimal fuer Retrieval kalibriert.
+    Laeuft lokal im Prozess (ONNX via FastEmbed), keine Netzwerkanfrage.
+    Muss demselben Modell entsprechen, mit dem vectorizing-service die
+    gespeicherten Dokumente vektorisiert hat, sonst sind die Vektoren
+    nicht im selben Raum vergleichbar.
     """
-    prefixed_text = f"search_query: {text}"
-
-    response = requests.post(
-        f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/embeddings",
-        json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": prefixed_text},
-        # War 30s - zu knapp, wenn Ollama zwischen dem Generierungsmodell
-        # (z. B. gemma4) und dem Embedding-Modell (nomic-embed-text)
-        # wechseln muss ("Model Swapping"). Beobachtet: Timeout direkt
-        # nachdem context-severity-detector-service kurz zuvor einen
-        # gemma4-Aufruf gemacht hatte.
-        timeout=90,
-    )
-    response.raise_for_status()
-    return response.json()["embedding"]
+    embeddings = list(_embedding_model.embed([text]))
+    return embeddings[0].tolist()
 
 
 def build_explanation_prompt(anomaly_summary: str, cause_text: str) -> str:
@@ -280,6 +305,20 @@ def _generate_via_gemini(prompt: str) -> str:
     return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
+def _call_llm(prompt: str) -> str:
+    """
+    Gemeinsamer Provider-Dispatch fuer jeden LLM-Aufruf dieses Service
+    (Erklaerungsgenerierung UND Rerank) - ein Ort fuer die Anbieter-Logik,
+    statt sie doppelt zu pflegen.
+    """
+    if LLM_PROVIDER == "ollama":
+        return _generate_via_ollama(prompt)
+    elif LLM_PROVIDER == "openai":
+        return _generate_via_openai(prompt)
+    elif LLM_PROVIDER == "gemini":
+        return _generate_via_gemini(prompt)
+
+
 def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | None:
     """
     Nutzt ein generatives Modell (nicht das Embedding-Modell), um in
@@ -303,15 +342,110 @@ def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | 
     prompt = build_explanation_prompt(anomaly_summary, cause_text)
 
     try:
-        if LLM_PROVIDER == "ollama":
-            return _generate_via_ollama(prompt)
-        elif LLM_PROVIDER == "openai":
-            return _generate_via_openai(prompt)
-        elif LLM_PROVIDER == "gemini":
-            return _generate_via_gemini(prompt)
+        return _call_llm(prompt)
     except (requests.RequestException, KeyError, IndexError, ValueError) as error:
         print(f"[{SERVICE_NAME}] Explanation generation failed, continuing without it: {error}")
         return None
+
+
+def build_rerank_prompt(anomaly_summary: str, candidates: list[dict]) -> str:
+    candidate_lines = "\n".join(
+        f"{i + 1}. \"{c['semantic_text']}\"" for i, c in enumerate(candidates)
+    )
+    return (
+        f"Anomalie: {anomaly_summary}\n\n"
+        "Bewerte fuer JEDEN der folgenden Kandidaten, wie plausibel er als "
+        "URSACHE fuer die Anomalie ist - nicht wie thematisch AEHNLICH er "
+        "klingt, sondern ob ein nachvollziehbarer WIRKUNGSMECHANISMUS "
+        "denkbar ist (z. B. ueber Zeit, Ressourcen, Systeme, "
+        "Abhaengigkeiten).\n\n"
+        "Orientierung an konkreten Beispielen:\n"
+        "0.9-1.0: Eindeutiger, gut nachvollziehbarer Wirkungsmechanismus "
+        "(z. B. eine Systemkomponente faellt aus, wodurch eine andere "
+        "Funktion direkt betroffen ist).\n"
+        "0.5-0.7: Moeglich, aber spekulativ - ein indirekter Zusammenhang "
+        "ist denkbar, aber nicht zwingend.\n"
+        "0.1-0.3: Kein erkennbarer inhaltlicher Zusammenhang, nur "
+        "oberflaechliche sprachliche oder strukturelle Aehnlichkeit.\n"
+        "0.0: Voellig unabhaengige Themen.\n\n"
+        f"{candidate_lines}\n\n"
+        "Antworte AUSSCHLIESSLICH im Format 'NUMMER: ZAHL', eine Zeile pro "
+        "Kandidat, keine Erklaerung, kein zusaetzlicher Text. Beispiel:\n"
+        "1: 0.2\n2: 0.9"
+    )
+
+
+def _parse_rerank_scores(raw_text: str, count: int) -> list[float]:
+    """
+    Robust gegen Modell-Abweichungen vom exakten Format (analog zu
+    _parse_score in context-severity-detector-service) - Zeilen, die
+    nicht zugeordnet werden koennen, werden ignoriert statt die ganze
+    Auswertung scheitern zu lassen. Nicht erwaehnte Kandidaten bleiben
+    bei 0.0 (konservativ: eher zu niedrig als erfunden hoch bewertet).
+    """
+    scores = [0.0] * count
+    for line in raw_text.strip().splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        index_part, score_part = line.split(":", 1)
+        try:
+            index = int(index_part.strip()) - 1
+            score = float(score_part.strip().split()[0].rstrip(".,;:"))
+        except (ValueError, IndexError):
+            continue
+        if 0 <= index < count:
+            scores[index] = max(0.0, min(1.0, score))
+    return scores
+
+
+def rerank_candidates_by_causal_plausibility(anomaly_summary: str, candidates: list[dict]) -> list[dict]:
+    """
+    Reine Vektor-Aehnlichkeit (Embeddings) misst thematische/lexikalische
+    Naehe, nicht KAUSALE Naehe - "Authentifizierungsserver-Wartung" und
+    "Login nicht moeglich" teilen kaum Wortschatz, obwohl der Zusammenhang
+    fuer einen Menschen offensichtlich ist, waehrend zwei oberflaechlich
+    aehnlich klingende, aber inhaltlich unabhaengige Kurzbeschwerden
+    embeddingsseitig naeher beieinander liegen koennen. Gefunden im
+    Severity-Demo: eine echte Ursache (Wartungsankuendigung) wurde
+    durchgaengig niedriger bewertet als mehrere klar irrelevante
+    Nachrichten - auch nach dem Wechsel zu einem staerkeren, explizit
+    deutschsprachigen Embedding-Modell (jina-embeddings-v2-base-de).
+    Kein Modell-Qualitaetsproblem, sondern eine grundsaetzliche Grenze
+    von reiner Vektor-Aehnlichkeit fuer kausale (statt thematische)
+    Fragen.
+
+    Dieser Schritt legt dem LLM alle zeitlich plausiblen Kandidaten vor
+    und laesst es KAUSALE Plausibilitaet bewerten. Der LLM-Score ERSETZT
+    den rohen Embedding-Score als massgebliches Konfidenzmass fuer
+    Threshold und Sortierung.
+
+    Bei Fehlschlag: faellt auf die urspruengliche, embedding-basierte
+    Reihenfolge zurueck, statt die Investigation komplett scheitern zu
+    lassen - Kausal-Bewertung ist eine Verbesserung, ihr Fehlen darf
+    nicht die gesamte Funktion blockieren.
+    """
+    if not candidates:
+        return candidates
+
+    prompt = build_rerank_prompt(anomaly_summary, candidates)
+
+    try:
+        raw_text = _call_llm(prompt)
+    except (requests.RequestException, KeyError, IndexError, ValueError) as error:
+        print(f"[{SERVICE_NAME}] Reranking failed, falling back to embedding-based order: {error}")
+        return candidates
+
+    scores = _parse_rerank_scores(raw_text, len(candidates))
+
+    reranked = []
+    for candidate, score in zip(candidates, scores):
+        updated = dict(candidate)
+        updated["confidence"] = score
+        reranked.append(updated)
+
+    reranked.sort(key=lambda c: c["confidence"], reverse=True)
+    return reranked
 
 
 def search_related_context(
@@ -392,7 +526,10 @@ def search_related_context(
 
     plausible = [c for c in candidates if c["occurred_before_anomaly"]]
     plausible.sort(key=lambda c: c["confidence"], reverse=True)
-    return plausible[:SEARCH_LIMIT]
+    # RERANK_POOL_SIZE statt SEARCH_LIMIT: der finale Cut auf SEARCH_LIMIT
+    # passiert erst NACH dem Rerank-Schritt, nicht schon hier auf Basis
+    # des rohen Embedding-Scores.
+    return plausible[:RERANK_POOL_SIZE]
 
 
 def build_anomaly_summary(payload: dict) -> str:
@@ -420,7 +557,7 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
     payload = anomaly_envelope["payload"]
     anomaly_summary = build_anomaly_summary(payload)
 
-    confident_candidates = [c for c in candidates if c["confidence"] >= CONFIDENCE_THRESHOLD]
+    confident_candidates = [c for c in candidates if c["confidence"] >= CONFIDENCE_THRESHOLD][:SEARCH_LIMIT]
 
     if not confident_candidates:
         return {
@@ -447,7 +584,8 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
         "anomaly_summary": anomaly_summary,
         "possible_causes": confident_candidates,
         "confidence_note": (
-            "Results are based on semantic similarity, not proven causality."
+            "Results reflect an LLM's judgment of causal plausibility, "
+            "not proven causality."
         ),
     }
 
@@ -514,8 +652,10 @@ def handle_message(channel, method, properties, body: bytes, qdrant_client: Qdra
 
     try:
         vector = create_embedding(search_text)
-    except requests.RequestException as error:
-        print(f"[{SERVICE_NAME}] Ollama error, will retry: {error}")
+    except Exception as error:
+        # Kein requests.RequestException mehr moeglich, da FastEmbed
+        # lokal im Prozess laeuft, kein Netzwerkaufruf.
+        print(f"[{SERVICE_NAME}] Embedding error, will retry: {error}")
         return
 
     try:
@@ -526,6 +666,13 @@ def handle_message(channel, method, properties, body: bytes, qdrant_client: Qdra
     except Exception as error:
         print(f"[{SERVICE_NAME}] Qdrant error, will retry: {error}")
         return
+
+    # Kausal-Rerank VOR dem Aufbau der Investigation - der rohe Embedding-
+    # Score misst nur thematische Naehe, nicht kausale Plausibilitaet
+    # (siehe rerank_candidates_by_causal_plausibility fuer die
+    # ausfuehrliche Begruendung).
+    anomaly_summary_for_rerank = build_anomaly_summary(payload)
+    candidates = rerank_candidates_by_causal_plausibility(anomaly_summary_for_rerank, candidates)
 
     investigation_payload = build_investigation_payload(envelope, candidates)
     investigation_event = create_investigation_event(envelope, investigation_payload)

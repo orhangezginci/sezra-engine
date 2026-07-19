@@ -2,9 +2,17 @@
 vectorizing-service
 
 Konsumiert von sezra.stream.enriched.semantic, nimmt payload.semantic_text,
-erzeugt daraus per Ollama (nomic-embed-text) einen Embedding-Vektor und
-schreibt ihn zusammen mit Metadaten (event_id, project_id, event_type,
-semantic_text) nach Qdrant.
+erzeugt daraus per FastEmbed (jina-embeddings-v2-base-de, lokal im Prozess,
+kein externer Service) einen Embedding-Vektor und schreibt ihn zusammen
+mit Metadaten (event_id, project_id, event_type, semantic_text) nach
+Qdrant.
+
+Vorher Ollama/nomic-embed-text ueber HTTP - umgestellt, nachdem sich die
+kleine, englisch-zentrierte nomic-embed-text-Einbettung als zu schwach
+fuer deutsche Kurztexte erwies (eine echte Ursache wurde niedriger
+bewertet als mehrere klar irrelevante Nachrichten). FastEmbed laeuft
+ONNX-basiert direkt im Prozess - kein Ollama-Container, keine
+host.docker.internal-Bruecke, kein Model-Swapping-Timeout mehr moeglich.
 
 Reiner Consumer: kein Publish zu irgendeiner Exchange. Wie bei
 persistence-service ist das Schreiben in einen externen Speicher (hier
@@ -20,7 +28,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pika
-import requests
+from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
@@ -35,7 +43,16 @@ INPUT_EXCHANGE = "sezra.stream.enriched.semantic"
 QUEUE_NAME = f"sezra.queue.{SERVICE_NAME}"
 
 QDRANT_COLLECTION_NAME = "sezra_semantic"
-EMBEDDING_VECTOR_SIZE = 768  # nomic-embed-text erzeugt 768-dimensionale Vektoren
+EMBEDDING_VECTOR_SIZE = 768  # jina-embeddings-v2-base-de erzeugt 768-dimensionale Vektoren
+
+# jina-embeddings-v2-base-de ist ein SYMMETRISCHES Modell (anders als
+# nomic-embed-text) - kein "search_query:"/"search_document:"-Prefix
+# noetig, dieselbe Funktion fuer Speichern und Suchen (analyzer-service)
+# nutzbar. Modell wird beim Docker-Image-Build vorab heruntergeladen
+# (siehe Dockerfile), damit der Container nicht bei jedem Start ~300MB
+# laden muss.
+EMBEDDING_MODEL_NAME = "jinaai/jina-embeddings-v2-base-de"
+_embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
 
 # Dupliziert aus deviation-detector-service (bewusst, keine geteilte
 # Bibliothek - siehe contracts/README.md, Abschnitt "Was ein Service
@@ -70,10 +87,6 @@ RABBITMQ_PASSWORD = required_env("RABBITMQ_PASSWORD")
 
 QDRANT_HOST = required_env("QDRANT_HOST")
 QDRANT_PORT = int(required_env("QDRANT_PORT"))
-
-OLLAMA_HOST = required_env("OLLAMA_HOST")
-OLLAMA_PORT = required_env("OLLAMA_PORT")
-OLLAMA_EMBEDDING_MODEL = required_env("OLLAMA_EMBEDDING_MODEL")
 
 
 def connect_to_rabbitmq() -> pika.BlockingConnection:
@@ -126,23 +139,14 @@ def publish_dead_letter(channel, original_body: bytes, reason: str, failure_clas
 
 def create_embedding(text: str) -> list[float]:
     """
-    nomic-embed-text erwartet ein Task-Prefix ("search_document:" fuer zu
-    speichernde/durchsuchende Texte, "search_query:" fuer Suchanfragen -
-    siehe Modell-Dokumentation). Ohne Prefix sind die Embeddings zwar
-    gueltig, aber nicht optimal fuer Retrieval kalibriert - das Modell
-    wurde explizit mit dieser Konvention trainiert.
+    Laeuft lokal im Prozess (ONNX via FastEmbed), keine Netzwerkanfrage,
+    kein externer Service noetig. Deutlich schneller als der vorherige
+    Ollama-HTTP-Aufruf, und ohne das Model-Swapping-Timeout-Problem, das
+    auftrat, wenn Ollama zwischen Embedding- und Generierungsmodell
+    wechseln musste.
     """
-    prefixed_text = f"search_document: {text}"
-
-    response = requests.post(
-        f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/embeddings",
-        json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": prefixed_text},
-        # War 30s - zu knapp bei Ollama-Model-Swapping (siehe
-        # analyzer-service main.py fuer die ausfuehrliche Begruendung).
-        timeout=90,
-    )
-    response.raise_for_status()
-    return response.json()["embedding"]
+    embeddings = list(_embedding_model.embed([text]))
+    return embeddings[0].tolist()
 
 
 def is_observation(payload: dict) -> bool:
@@ -238,11 +242,14 @@ def handle_message(channel, method, properties, body: bytes, qdrant_client: Qdra
 
     try:
         vector = create_embedding(semantic_text)
-    except requests.RequestException as error:
+    except Exception as error:
         # Kein Dead-Letter, kein Ack: das Envelope war gueltig, das
-        # Problem liegt an Ollama (z. B. kurz nicht erreichbar).
-        # Nachricht bleibt in der Queue, wird erneut zugestellt.
-        print(f"[{SERVICE_NAME}] Ollama error, will retry: {error}")
+        # Problem liegt an der lokalen Embedding-Erzeugung selbst (z. B.
+        # kurzzeitige Ressourcen-Engpaesse). Kein requests.RequestException
+        # mehr moeglich, da FastEmbed lokal im Prozess laeuft, kein
+        # Netzwerkaufruf. Nachricht bleibt in der Queue, wird erneut
+        # zugestellt.
+        print(f"[{SERVICE_NAME}] Embedding error, will retry: {error}")
         return
 
     try:

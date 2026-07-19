@@ -23,11 +23,11 @@ os.environ["QDRANT_HOST"] = "localhost"
 os.environ["QDRANT_PORT"] = "6333"
 os.environ["OLLAMA_HOST"] = "localhost"
 os.environ["OLLAMA_PORT"] = "11434"
-os.environ["OLLAMA_EMBEDDING_MODEL"] = "nomic-embed-text"
 os.environ["LLM_PROVIDER"] = "ollama"
 os.environ["OLLAMA_GENERATION_MODEL"] = "qwen2.5:1.5b"
 os.environ["ANALYZER_CONFIDENCE_THRESHOLD"] = "0.5"
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import requests  # noqa: E402
 
@@ -37,12 +37,15 @@ from main import (  # noqa: E402
     OUTPUT_EXCHANGE,
     _generate_via_gemini,
     _generate_via_openai,
+    _parse_rerank_scores,
     build_anomaly_search_text,
     build_investigation_payload,
+    build_rerank_prompt,
     create_embedding,
     create_investigation_event,
     generate_causal_explanation,
     handle_message,
+    rerank_candidates_by_causal_plausibility,
     search_related_context,
 )
 
@@ -103,26 +106,45 @@ REKTOR_MAIL_TEXT = (
 
 
 class TestCreateEmbedding:
-    def test_prepends_search_query_prefix(self, monkeypatch):
+    def test_returns_vector_from_embedding_model(self, monkeypatch):
+        array = np.array([0.1] * 768)
+        monkeypatch.setattr(
+            main, "_embedding_model", SimpleNamespace(embed=lambda docs: iter([array]))
+        )
+
+        vector = create_embedding("some anomaly description")
+
+        assert vector == [0.1] * 768
+
+    def test_passes_raw_text_without_prefix(self, monkeypatch):
         """
-        nomic-embed-text erwartet dieses Task-Prefix fuer Suchanfragen,
-        unterschieden von search_document (vectorizing-service) fuer die
-        gespeicherten Texte.
+        jina-embeddings-v2-base-de ist ein SYMMETRISCHES Modell (anders
+        als nomic-embed-text) - kein "search_query:"-Prefix noetig,
+        muss aber IDENTISCH zu vectorizing-service sein (dort ebenfalls
+        kein Prefix), sonst sind die Vektoren nicht im selben Raum
+        vergleichbar.
         """
         captured = {}
+        array = np.array([0.1] * 768)
 
-        def fake_post(url, json, timeout):
-            captured["prompt"] = json["prompt"]
-            response = MagicMock()
-            response.json.return_value = {"embedding": [0.1] * 768}
-            response.raise_for_status.return_value = None
-            return response
+        def fake_embed(documents):
+            captured["documents"] = list(documents)
+            return iter([array])
 
-        monkeypatch.setattr(requests, "post", fake_post)
+        monkeypatch.setattr(main, "_embedding_model", SimpleNamespace(embed=fake_embed))
 
         create_embedding("some anomaly description")
 
-        assert captured["prompt"] == "search_query: some anomaly description"
+        assert captured["documents"] == ["some anomaly description"]
+
+    def test_propagates_embedding_model_errors(self, monkeypatch):
+        def raise_error(documents):
+            raise RuntimeError("embedding failed")
+
+        monkeypatch.setattr(main, "_embedding_model", SimpleNamespace(embed=raise_error))
+
+        with pytest.raises(RuntimeError):
+            create_embedding("some anomaly description")
 
 
 class TestBuildAnomalySearchText:
@@ -146,6 +168,41 @@ class TestBuildAnomalySearchText:
         )
 
         assert "Login nicht moeglich" in text
+
+    def test_severity_anomaly_search_text_has_no_meta_wrapper(self):
+        """
+        Regressionstest: der Suchtext fuer Severity-Anomalien darf KEINEN
+        englischen Meta-Rahmensatz ("A message was flagged as...") um
+        den Beschwerdetext legen - das verwaesserte die inhaltliche
+        Aehnlichkeit gegenueber den gespeicherten Kontext-Dokumenten
+        (die kein solches Framing tragen). Gefunden im realistischeren
+        Severity-Demo-Test: eine tatsaechlich passende Ursache
+        (Wartungsankuendigung) wurde niedriger bewertet als mehrere
+        klar irrelevante Nachrichten, alle eng beieinander im Score.
+        """
+        text = build_anomaly_search_text(
+            {"anomaly_type": "severity", "severity_score": 0.95, "text": "Login nicht moeglich"}
+        )
+
+        assert text == "Login nicht moeglich"
+
+    def test_severity_anomaly_ignores_boilerplate_reason(self):
+        """
+        Der "reason"-Text bei Severity-Anomalien ist reines englisches
+        Boilerplate (siehe context-severity-detector-service), kein
+        fachlicher Inhalt - darf den moeglichst reinen Suchtext nicht
+        verwaessern, im Gegensatz zu Metrik-Anomalien, wo reason echten
+        Erklaerungswert hat (z. B. "value decreased significantly...").
+        """
+        text = build_anomaly_search_text(
+            {
+                "anomaly_type": "severity",
+                "text": "Login nicht moeglich",
+                "reason": "single message was rated highly urgent/severe by content evaluation",
+            }
+        )
+
+        assert text == "Login nicht moeglich"
 
     def test_includes_reason(self):
         text = build_anomaly_search_text(ANOMALY_ENVELOPE["payload"])
@@ -470,6 +527,110 @@ class TestGenerateCausalExplanation:
         assert result is None
 
 
+class TestParseRerankScores:
+    def test_parses_clean_format(self):
+        result = _parse_rerank_scores("1: 0.2\n2: 0.9\n3: 0.1", 3)
+
+        assert result == [0.2, 0.9, 0.1]
+
+    def test_ignores_unparseable_lines_instead_of_failing(self):
+        result = _parse_rerank_scores("1: 0.2 (niedrig)\n2:0.9\nirgendwas komisches\n3: 0.5", 3)
+
+        assert result == [0.2, 0.9, 0.5]
+
+    def test_clamps_out_of_range_scores(self):
+        result = _parse_rerank_scores("1: 1.5\n2: -0.3", 2)
+
+        assert result == [1.0, 0.0]
+
+    def test_missing_candidates_default_to_zero(self):
+        """
+        Konservativ: ein vom Modell nicht erwaehnter Kandidat bleibt bei
+        0.0, wird also nie erfunden hoch bewertet.
+        """
+        result = _parse_rerank_scores("1: 0.8", 3)
+
+        assert result == [0.8, 0.0, 0.0]
+
+
+class TestBuildRerankPrompt:
+    def test_includes_anomaly_summary_and_all_candidates(self):
+        candidates = [
+            {"semantic_text": "erster Kandidat"},
+            {"semantic_text": "zweiter Kandidat"},
+        ]
+
+        prompt = build_rerank_prompt("Login nicht moeglich", candidates)
+
+        assert "Login nicht moeglich" in prompt
+        assert "erster Kandidat" in prompt
+        assert "zweiter Kandidat" in prompt
+
+    def test_includes_calibration_anchors(self):
+        """
+        Ohne konkrete Ankerbeispiele komprimieren Modelle Bewertungen
+        tendenziell in die Mitte der Skala (dieselbe Lehre wie beim
+        Severity-Detector-Prompt) - die Ankerbeispiele muessen also
+        tatsaechlich im Prompt stehen, nicht nur eine abstrakte
+        0.0-1.0-Skala.
+        """
+        prompt = build_rerank_prompt("summary", [{"semantic_text": "x"}])
+
+        assert "0.9-1.0" in prompt
+        assert "Wirkungsmechanismus" in prompt
+
+
+class TestRerankCandidatesByCausalPlausibility:
+    def test_replaces_confidence_with_llm_score(self, monkeypatch):
+        """
+        Der Kern des Fixes: die tatsaechliche Ursache (Wartungs-
+        ankuendigung) hatte einen NIEDRIGEREN rohen Embedding-Score als
+        eine irrelevante Nachricht, sollte aber nach dem Rerank hoeher
+        eingestuft werden, weil das LLM kausale statt thematische
+        Plausibilitaet bewertet.
+        """
+        fake_response = MagicMock()
+        fake_response.json.return_value = {"response": "1: 0.2\n2: 0.9"}
+        fake_response.raise_for_status.return_value = None
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+
+        candidates = [
+            {"semantic_text": "irrelevante, aber thematisch aehnliche Nachricht", "confidence": 0.75},
+            {"semantic_text": "Wartungsankuendigung Authentifizierungsserver", "confidence": 0.65},
+        ]
+
+        result = rerank_candidates_by_causal_plausibility("Login nicht moeglich", candidates)
+
+        assert result[0]["semantic_text"] == "Wartungsankuendigung Authentifizierungsserver"
+        assert result[0]["confidence"] == 0.9
+        assert result[1]["confidence"] == 0.2
+
+    def test_falls_back_to_original_order_on_llm_failure(self, monkeypatch):
+        """
+        Kausal-Bewertung ist eine Verbesserung, ihr Fehlen darf nicht die
+        gesamte Investigation blockieren - Rueckfall auf die
+        urspruengliche, embedding-basierte Reihenfolge.
+        """
+        def raise_error(*args, **kwargs):
+            raise requests.ConnectionError("LLM unreachable")
+
+        monkeypatch.setattr(requests, "post", raise_error)
+
+        candidates = [
+            {"semantic_text": "a", "confidence": 0.7},
+            {"semantic_text": "b", "confidence": 0.6},
+        ]
+
+        result = rerank_candidates_by_causal_plausibility("summary", candidates)
+
+        assert result == candidates
+
+    def test_empty_candidates_returns_empty(self):
+        result = rerank_candidates_by_causal_plausibility("summary", [])
+
+        assert result == []
+
+
 class TestBuildInvestigationPayload:
     def test_confident_candidate_is_included(self, monkeypatch):
         fake_response = MagicMock()
@@ -624,12 +785,29 @@ class TestHandleMessage:
         """
         End-to-end durch handle_message mit dem echten Szenario: die
         Rektor-Mail (vor der Anomalie, hohe Similarity) wird als
-        wahrscheinliche Ursache gefunden.
+        wahrscheinliche Ursache gefunden. Zwei LLM-Aufrufe hintereinander:
+        erst der Rerank (kausale Plausibilitaet), dann die
+        Erklaerungsgenerierung fuer den bestaetigten Kandidaten.
         """
-        fake_response = MagicMock()
-        fake_response.json.return_value = {"embedding": [0.1] * 768}
-        fake_response.raise_for_status.return_value = None
-        monkeypatch.setattr(requests, "post", lambda *a, **kw: fake_response)
+        monkeypatch.setattr(
+            main, "_embedding_model", SimpleNamespace(embed=lambda docs: iter([np.array([0.1] * 768)]))
+        )
+
+        call_count = {"n": 0}
+
+        def fake_post(url, json=None, timeout=None, headers=None, params=None):
+            call_count["n"] += 1
+            response = MagicMock()
+            if call_count["n"] == 1:
+                # Rerank-Aufruf: hohe kausale Plausibilitaet fuer den
+                # einzigen Kandidaten.
+                response.json.return_value = {"response": "1: 0.9"}
+            else:
+                response.json.return_value = {"response": "eine generierte Erklaerung"}
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
 
         qdrant_client = MagicMock()
         qdrant_client.query_points.return_value = SimpleNamespace(
@@ -657,11 +835,11 @@ class TestHandleMessage:
         assert channel.published[0]["exchange"] == DEAD_LETTER_EXCHANGE
         assert channel.acked == [1]
 
-    def test_ollama_error_is_not_acked(self, monkeypatch):
-        def raise_error(*args, **kwargs):
-            raise requests.ConnectionError("Ollama unreachable")
+    def test_embedding_error_is_not_acked(self, monkeypatch):
+        def raise_error(documents):
+            raise RuntimeError("embedding failed")
 
-        monkeypatch.setattr(requests, "post", raise_error)
+        monkeypatch.setattr(main, "_embedding_model", SimpleNamespace(embed=raise_error))
 
         channel = FakeChannel()
         qdrant_client = MagicMock()
