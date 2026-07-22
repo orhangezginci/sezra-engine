@@ -1,17 +1,24 @@
 #!/bin/bash
 set -e
 
-# Demo-Szenario: technischer Fehler im Checkout -> Einbruch der
-# Conversion-Rate. Testet den bisher nur simulierten Metrik-zu-Metrik-Fall
-# (checkout_error_rate als andere Beobachtungsreihe erklaert
-# conversion_rate) live end-to-end, im Gegensatz zum School-Szenario
-# (Metrik-zu-Text).
+# Demo-Szenario: verzoegerte Zollabfertigung fuehrt zu laengeren
+# Transitzeiten unter weniger kontrollierten Bedingungen, wodurch die
+# Kuehlkette (temperaturkritischer Pharma-Transport, z. B. Impfstoffe/
+# Biologika) haeufiger ueberschritten wird. Bewusst reine Logistik-
+# Kennzahlen, KEIN Patientenbezug - SEZRA praesentiert sich hier als
+# Korrelations-Hinweisgeber fuer Fachpersonal (Lieferketten-Monitoring),
+# nicht als klinisches oder diagnostisches System.
+#
+# Metrik-zu-Metrik-Muster wie das E-Commerce-Szenario (checkout_error_rate
+# -> conversion_rate), nur aus der Pharma-Lieferkette statt dem Online-
+# Handel: customs_clearance_delay_hours (Ursache) -> 
+# cold_chain_temperature_excursion_rate (Anomalie).
 #
 # Startet den kompletten Stack sauber (down + gezieltes Leeren von
-# Postgres/Qdrant, ollama-data bleibt erhalten), reicht Baseline-Werte
-# fuer beide Metriken sowie den Checkout-Fehler-Spike und den
-# Conversion-Rate-Abfall per HTTP ein, wartet auf und zeigt das
-# Investigation-Ergebnis.
+# Postgres/Qdrant, ollama-data bleibt erhalten, falls vorhanden), reicht
+# Baseline-Werte fuer beide Metriken sowie den Zoll-Verzoegerungs-Anstieg
+# und den Kuehlketten-Uebershreitungs-Anstieg per HTTP ein, wartet auf
+# und zeigt das Investigation-Ergebnis.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -48,11 +55,10 @@ if [ -z "$RABBITMQ_USER" ] || [ -z "$RABBITMQ_PASSWORD" ]; then
   exit 1
 fi
 
-echo "=== SEZRA Demo: E-Commerce Scenario (Metrik -> Metrik) ==="
+echo "=== SEZRA Demo: Pharma-Logistik Scenario (Metrik -> Metrik) ==="
 echo ""
 
 echo "0/4 Stack wird neu gestartet (down + up --build)..."
-echo "    Hinweis: ollama-data bleibt erhalten (kein erneuter Modell-Download)."
 docker compose down > /dev/null 2>&1 || true
 docker compose up --build -d $STACK_SERVICES
 
@@ -162,24 +168,24 @@ post_observation() {
     -d "$1" > /dev/null
 }
 
-echo "1/4 Baseline: checkout_error_rate (stabil, ~2%)..."
-for value in 2.1 1.9 2.0 2.2 1.8; do
-  post_observation "{\"metric\": \"checkout_error_rate\", \"value\": $value}"
+echo "1/4 Baseline: customs_clearance_delay_hours (stabil, ~4h)..."
+for value in 3.8 4.1 4.0 3.9 4.2; do
+  post_observation "{\"metric\": \"customs_clearance_delay_hours\", \"value\": $value}"
   sleep 3
 done
 
-echo "2/4 Baseline: conversion_rate (stabil, ~3.5%)..."
-for value in 3.4 3.6 3.5 3.4 3.6; do
-  post_observation "{\"metric\": \"conversion_rate\", \"value\": $value}"
+echo "2/4 Baseline: cold_chain_temperature_excursion_rate (stabil, ~1.2%)..."
+for value in 1.1 1.3 1.2 1.1 1.3; do
+  post_observation "{\"metric\": \"cold_chain_temperature_excursion_rate\", \"value\": $value}"
   sleep 3
 done
 
-echo "3/4 Checkout-Fehler-Spike (Ursache)..."
-post_observation '{"metric": "checkout_error_rate", "value": 27.5}'
+echo "3/4 Zoll-Verzoegerung steigt deutlich an (Ursache)..."
+post_observation '{"metric": "customs_clearance_delay_hours", "value": 18.5}'
 sleep 8
 
-echo "4/4 Conversion-Rate-Einbruch (Anomalie)..."
-post_observation '{"metric": "conversion_rate", "value": 1.1}'
+echo "4/4 Kuehlketten-Ueberschreitungsrate steigt an (Anomalie)..."
+post_observation '{"metric": "cold_chain_temperature_excursion_rate", "value": 9.7}'
 
 echo ""
 echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."

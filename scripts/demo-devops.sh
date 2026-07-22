@@ -24,7 +24,7 @@ CONSUMER_READY_TIMEOUT_SECONDS=60
 
 CONSUMER_QUEUES="sezra.queue.ingestion-service sezra.queue.knowledge-service sezra.queue.vectorizing-service sezra.queue.deviation-detector-service sezra.queue.persistence-service sezra.queue.analyzer-service"
 
-STACK_SERVICES="rabbitmq postgres ollama-model-pull qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service"
+STACK_SERVICES="rabbitmq postgres qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service"
 
 if [ ! -f "docker-compose.yml" ]; then
   echo "Fehler: docker-compose.yml nicht gefunden. Im Repo-Root ausfuehren."
@@ -80,7 +80,7 @@ count = 0
 for entry in entries:
     state = entry.get('State', '')
     health = entry.get('Health', '')
-    if entry.get('Service') in ('ollama-model-pull', 'persistence-migrations'):
+    if entry.get('Service') == 'persistence-migrations':
         if state == 'exited' and entry.get('ExitCode') == 0:
             continue
         count += 1

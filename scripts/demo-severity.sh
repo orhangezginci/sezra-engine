@@ -34,7 +34,7 @@ CONSUMER_READY_TIMEOUT_SECONDS=60
 
 CONSUMER_QUEUES="sezra.queue.ingestion-service sezra.queue.knowledge-service sezra.queue.vectorizing-service sezra.queue.deviation-detector-service sezra.queue.persistence-service sezra.queue.analyzer-service sezra.queue.context-severity-detector-service"
 
-STACK_SERVICES="rabbitmq postgres ollama-model-pull qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service context-severity-detector-service"
+STACK_SERVICES="rabbitmq postgres qdrant persistence-migrations api-service ingestion-service knowledge-service persistence-service vectorizing-service deviation-detector-service analyzer-service context-severity-detector-service"
 
 if [ ! -f "docker-compose.yml" ]; then
   echo "Fehler: docker-compose.yml nicht gefunden. Im Repo-Root ausfuehren."
@@ -62,8 +62,8 @@ echo "=== SEZRA Demo: Severity Scenario (einzelne Nachricht loest sofort aus) ==
 echo ""
 
 echo "0/4 Stack wird neu gestartet (down + up --build)..."
-echo "    Hinweis: Ollama laeuft nativ (nicht in Docker), ollama-model-pull"
-echo "    erreicht es ueber host.docker.internal."
+echo "    Hinweis: Embeddings laufen lokal (FastEmbed), Textgenerierung"
+echo "    ueber LLM_PROVIDER (Ollama nativ auf dem Host oder Cloud-Anbieter)."
 docker compose down > /dev/null 2>&1 || true
 docker compose up --build -d $STACK_SERVICES
 
@@ -91,7 +91,7 @@ count = 0
 for entry in entries:
     state = entry.get('State', '')
     health = entry.get('Health', '')
-    if entry.get('Service') in ('ollama-model-pull', 'persistence-migrations'):
+    if entry.get('Service') == 'persistence-migrations':
         if state == 'exited' and entry.get('ExitCode') == 0:
             continue
         count += 1

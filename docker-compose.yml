@@ -39,19 +39,6 @@ services:
       timeout: 5s
       retries: 10
 
-  ollama-model-pull:
-    build:
-      context: .
-      dockerfile: infra/ollama-model-pull/Dockerfile
-    environment:
-      # macOS Docker Desktop: host.docker.internal erreicht den nativen
-      # Ollama-Prozess auf dem Host, kein eigener Container mehr noetig.
-      # Voraussetzung: Ollama muss an 0.0.0.0 binden, nicht nur
-      # localhost (siehe launchctl setenv OLLAMA_HOST "0.0.0.0").
-      OLLAMA_HOST: host.docker.internal
-      OLLAMA_PORT: 11434
-      OLLAMA_MODELS_TO_PULL: "nomic-embed-text,gemma4"
-
   qdrant:
     image: qdrant/qdrant:latest
     ports:
@@ -153,8 +140,6 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-      ollama-model-pull:
-        condition: service_completed_successfully
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
@@ -162,9 +147,6 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
-      OLLAMA_HOST: host.docker.internal
-      OLLAMA_PORT: 11434
-      OLLAMA_EMBEDDING_MODEL: nomic-embed-text
 
   deviation-detector-service:
     build:
@@ -191,8 +173,6 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-      ollama-model-pull:
-        condition: service_completed_successfully
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
@@ -200,10 +180,9 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
+      LLM_PROVIDER: ${LLM_PROVIDER}
       OLLAMA_HOST: host.docker.internal
       OLLAMA_PORT: 11434
-      OLLAMA_EMBEDDING_MODEL: nomic-embed-text
-      LLM_PROVIDER: ${LLM_PROVIDER}
       OLLAMA_GENERATION_MODEL: gemma4
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_GENERATION_MODEL: ${OPENAI_GENERATION_MODEL}
@@ -212,6 +191,7 @@ services:
       GEMINI_GENERATION_MODEL: ${GEMINI_GENERATION_MODEL}
       ANALYZER_SEARCH_LIMIT: 5
       ANALYZER_CONFIDENCE_THRESHOLD: 0.5
+      ANALYZER_NOISE_FLOOR: 0.15
 
   api-service:
     build:
@@ -245,8 +225,6 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      ollama-model-pull:
-        condition: service_completed_successfully
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672

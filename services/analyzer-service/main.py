@@ -65,6 +65,16 @@ CONFIDENCE_THRESHOLD = float(os.getenv("ANALYZER_CONFIDENCE_THRESHOLD", "0.5"))
 # fehlen. Der Rerank-Schritt bewertet diesen groesseren Pool neu.
 RERANK_POOL_SIZE = int(os.getenv("ANALYZER_RERANK_POOL_SIZE", "10"))
 
+# Grenze zwischen "echtes Rauschen" und "unsicheres, aber reales Signal" -
+# ein Kandidat unter CONFIDENCE_THRESHOLD wird nicht komplett verworfen,
+# nur weil er nicht "sicher genug" ist. "Eine 0.2 ist nur relevant, wenn's
+# keine 0.8 gibt" - SEZRA soll auch nicht-offensichtliche, unsichere
+# Richtungen aufzeigen, nicht nur bewiesene Ursachen, aber klar getrennt
+# von sicheren Funden praesentieren (siehe weak_leads in
+# build_investigation_payload).
+NOISE_FLOOR = float(os.getenv("ANALYZER_NOISE_FLOOR", "0.15"))
+WEAK_LEADS_LIMIT = int(os.getenv("ANALYZER_WEAK_LEADS_LIMIT", "3"))
+
 
 def required_env(name: str) -> str:
     value = os.getenv(name)
@@ -559,33 +569,63 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
 
     confident_candidates = [c for c in candidates if c["confidence"] >= CONFIDENCE_THRESHOLD][:SEARCH_LIMIT]
 
-    if not confident_candidates:
+    if confident_candidates:
+        # Nur fuer bereits bestaetigte (ueber dem Threshold liegende)
+        # Kandidaten eine Erklaerung generieren - spart Rechenzeit und
+        # vermeidet, dass das Modell plausibel klingende Geschichten zu
+        # eigentlich verworfenen, schwachen Treffern erfindet.
+        for candidate in confident_candidates:
+            candidate["explanation"] = generate_causal_explanation(
+                anomaly_summary, candidate["semantic_text"]
+            )
+
         return {
             "anomaly_summary": anomaly_summary,
-            "possible_causes": [],
+            "possible_causes": confident_candidates,
+            "weak_leads": [],
             "confidence_note": (
-                "No context above the confidence threshold "
-                f"({CONFIDENCE_THRESHOLD}) was found. This does not mean "
-                "there is no cause - only that no sufficiently similar "
-                "context exists in the available data."
+                "Results reflect an LLM's judgment of causal plausibility, "
+                "not proven causality."
             ),
         }
 
-    # Nur fuer bereits bestaetigte (ueber dem Threshold liegende) Kandidaten
-    # eine Erklaerung generieren - spart Rechenzeit und vermeidet, dass das
-    # Modell plausibel klingende Geschichten zu eigentlich verworfenen,
-    # schwachen Treffern erfindet.
-    for candidate in confident_candidates:
-        candidate["explanation"] = generate_causal_explanation(
-            anomaly_summary, candidate["semantic_text"]
-        )
+    # Keine sichere Ursache - aber vielleicht schwache, unsichere Signale,
+    # die trotzdem eine manuelle Pruefung wert sind. Ein niedriger Score
+    # verschwindet nicht komplett im Nichts, wird aber klar von einer
+    # sicheren Ursache unterschieden (eigenes Feld, eigene
+    # confidence_note) - SEZRA soll auch nicht-offensichtliche, unsichere
+    # Richtungen aufzeigen, nicht nur bewiesene Ursachen praesentieren
+    # oder schweigen.
+    weak_candidates = [
+        c for c in candidates if NOISE_FLOOR <= c["confidence"] < CONFIDENCE_THRESHOLD
+    ][:WEAK_LEADS_LIMIT]
+
+    if weak_candidates:
+        for candidate in weak_candidates:
+            candidate["explanation"] = generate_causal_explanation(
+                anomaly_summary, candidate["semantic_text"]
+            )
+
+        return {
+            "anomaly_summary": anomaly_summary,
+            "possible_causes": [],
+            "weak_leads": weak_candidates,
+            "confidence_note": (
+                f"No cause reached the confidence threshold ({CONFIDENCE_THRESHOLD}), "
+                "but weak leads below that threshold are listed separately - "
+                "worth a manual look, not a confirmed cause."
+            ),
+        }
 
     return {
         "anomaly_summary": anomaly_summary,
-        "possible_causes": confident_candidates,
+        "possible_causes": [],
+        "weak_leads": [],
         "confidence_note": (
-            "Results reflect an LLM's judgment of causal plausibility, "
-            "not proven causality."
+            "No context above the noise floor "
+            f"({NOISE_FLOOR}) was found. This does not mean there is no "
+            "cause - only that no sufficiently similar context exists in "
+            "the available data."
         ),
     }
 

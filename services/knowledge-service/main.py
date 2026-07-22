@@ -98,13 +98,23 @@ def build_semantic_text(payload: dict) -> str:
     gleichermassen fuer School-, Healthcare- oder Manufacturing-Payloads,
     weil sie einfach ueber alle vorhandenen Felder iteriert (ausser
     technischen Pipeline-Feldern, siehe NON_SEMANTIC_FIELDS).
+
+    Macht nicht nur Feldnamen (Schluessel) lesbar, sondern auch
+    Werte, die wie Bezeichner aussehen (Unterstriche enthalten, z. B.
+    ein Metrik-Name wie "customs_clearance_delay_hours") - bewusst
+    weiterhin generisch (jeder String mit Unterstrich, kein Wissen
+    ueber "das ist ein Metrik-Name"). Gefunden, als ein LLM beim
+    Kausal-Rerank zwei rohe Metrik-Bezeichner kaum als zusammenhaengend
+    einstufte, obwohl der Zusammenhang bei lesbarer Formulierung
+    ("customs clearance delay hours") eher erkennbar sein sollte.
     """
     parts = []
     for key, value in payload.items():
         if key in NON_SEMANTIC_FIELDS:
             continue
         readable_key = key.replace("_", " ")
-        parts.append(f"{readable_key}: {value}")
+        readable_value = value.replace("_", " ") if isinstance(value, str) else value
+        parts.append(f"{readable_key}: {readable_value}")
     return "; ".join(parts)
 
 

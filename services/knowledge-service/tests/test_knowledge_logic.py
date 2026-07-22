@@ -85,7 +85,7 @@ class TestBuildSemanticText:
             }
         )
 
-        assert "metric: checkout_error_rate" in text
+        assert "metric: checkout error rate" in text
         assert "composite_key" not in text
         assert "source_event_id" not in text
         assert "source_event_type" not in text
