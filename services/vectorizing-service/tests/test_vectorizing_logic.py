@@ -85,6 +85,7 @@ VALID_ENVELOPE = {
         "semantic_text": "metric: test; value: 42",
         "source_occurred_at": "2026-07-05T09:58:00Z",
         "source_event_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "source_event_type": "ObservationIngested",
     },
 }
 
@@ -195,6 +196,25 @@ class TestWriteToQdrant:
         assert point.payload["event_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"  # source_event_id, nicht der Wrapper selbst
         assert point.payload["project_id"] == VALID_ENVELOPE["project_id"]
         assert point.payload["occurred_at"] == "2026-07-05T09:58:00Z"  # source_occurred_at, nicht envelope occurred_at
+        assert point.payload["source_event_type"] == "ObservationIngested"  # nicht envelope["event_type"]
+
+    def test_falls_back_to_envelope_event_type_when_source_event_type_missing(self):
+        """
+        Regressionstest, analog zu event_id/occurred_at: ohne diesen
+        Fallback wuerde envelope["event_type"] (immer
+        "SemanticEnrichmentGenerated", der Anreicherungs-Wrapper) in
+        Qdrant landen statt des urspruenglichen Typs - dadurch koennte
+        ein spaeterer Consumer nie zuverlaessig zwischen echten Kontext-
+        Einreichungen und Anomalie-Vektoren unterscheiden.
+        """
+        client = MagicMock()
+        envelope = dict(VALID_ENVELOPE)
+        envelope["payload"] = {"metric": "test", "value": 42, "semantic_text": "text"}
+
+        write_to_qdrant(client, envelope, FAKE_VECTOR)
+
+        point = client.upsert.call_args.kwargs["points"][0]
+        assert point.payload["source_event_type"] == VALID_ENVELOPE["event_type"]
 
     def test_falls_back_to_envelope_event_id_when_source_event_id_missing(self):
         """

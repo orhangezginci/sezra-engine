@@ -198,6 +198,16 @@ def write_to_qdrant(qdrant_client: QdrantClient, envelope: dict, vector: list[fl
                     "event_id": payload.get("source_event_id", envelope["event_id"]),
                     "project_id": envelope.get("project_id"),
                     "event_type": envelope["event_type"],
+                    # source_event_type (Payload-Konvention, wie
+                    # source_event_id/source_occurred_at) ist der
+                    # urspruengliche Event-Type (z. B. ContextIngested,
+                    # AnomalyDetected) - envelope["event_type"] ist immer
+                    # "SemanticEnrichmentGenerated" (der Anreicherungs-
+                    # Wrapper), nutzlos zum Filtern "nur echte
+                    # Ticket-/Kontext-Einreichungen, keine Anomalie-
+                    # Vektoren". Fallback auf envelope["event_type"] fuer
+                    # Envelopes ohne diese Konvention.
+                    "source_event_type": payload.get("source_event_type", envelope["event_type"]),
                     "source": envelope["source"],
                     # source_occurred_at (payload-Konvention, siehe
                     # payload-conventions.md) ist der Zeitpunkt des
