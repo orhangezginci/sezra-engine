@@ -228,7 +228,25 @@ def create_embedding(text: str) -> list[float]:
     return embeddings[0].tolist()
 
 
-def build_explanation_prompt(anomaly_summary: str, cause_text: str) -> str:
+def build_explanation_prompt(anomaly_summary: str, cause_text: str, anomaly_type: str | None = None) -> str:
+    if anomaly_type == "volume":
+        # Bei einer Volumen-Anomalie (context-volume-detector-service)
+        # ist der "Kandidat" keine URSACHE der Haeufung, sondern ein
+        # GLEICHRANGIGES Beispiel desselben zugrunde liegenden Problems -
+        # die Ursache→Wirkung-Formulierung unten fuehrte hier zu
+        # logisch verdrehten Erklaerungen ("Ticket A verursachte die
+        # Haeufung aus 5 Tickets, zu denen A selbst gehoert").
+        return (
+            f"Beobachtung: {anomaly_summary}\n"
+            f"Verwandte Meldung: \"{cause_text}\"\n\n"
+            "Erklaere in GENAU EINEM vollstaendigen Satz auf Deutsch, "
+            "inwiefern diese Meldung dasselbe zugrunde liegende Problem "
+            "beschreibt wie die beobachtete Haeufung - NICHT als Ursache "
+            "der anderen Meldungen, sondern als weiteres Beispiel "
+            "desselben Musters. Nutze \"koennte\" oder \"moeglicherweise\". "
+            "Nur der eine Satz, keine Wiederholung der Eingabe."
+        )
+
     return (
         f"Beobachtete Anomalie: {anomaly_summary}\n"
         f"Moeglicher Ausloeser: \"{cause_text}\"\n\n"
@@ -329,12 +347,20 @@ def _call_llm(prompt: str) -> str:
         return _generate_via_gemini(prompt)
 
 
-def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | None:
+def generate_causal_explanation(
+    anomaly_summary: str, cause_text: str, anomaly_type: str | None = None
+) -> str | None:
     """
     Nutzt ein generatives Modell (nicht das Embedding-Modell), um in
     eigenen Worten zu erklaeren, WIE der gefundene Kontext zur Anomalie
     gefuehrt haben koennte - Ergaenzung zum rohen semantic_text, nicht
     Ersatz dafuer (Transparenz/Nachvollziehbarkeit bleibt erhalten).
+
+    anomaly_type steuert die Prompt-Formulierung (siehe
+    build_explanation_prompt) - bei "volume" ist die Beziehung zwischen
+    Anomalie und Kandidat keine Ursache→Wirkung-Kette, sondern
+    "gehoeren zum selben Muster", eine andere Formulierung als bei
+    Metrik-/Severity-Anomalien.
 
     Anbieter ist ueber LLM_PROVIDER konfigurierbar: "ollama" fuer
     produktiven Einsatz mit sensiblen Daten (bleibt lokal), "openai"/
@@ -349,7 +375,7 @@ def generate_causal_explanation(anomaly_summary: str, cause_text: str) -> str | 
     die Investigation soll trotzdem mit dem rohen semantic_text nutzbar
     bleiben, auch ohne generierte Erklaerung.
     """
-    prompt = build_explanation_prompt(anomaly_summary, cause_text)
+    prompt = build_explanation_prompt(anomaly_summary, cause_text, anomaly_type)
 
     try:
         return _call_llm(prompt)
@@ -549,12 +575,26 @@ def build_anomaly_summary(payload: dict) -> str:
     "current_value" auszugehen. Ohne diese Unterscheidung erzeugte eine
     Severity-Anomalie (kein "metric"-Feld) die irrefuehrende
     Zusammenfassung "None changed from None to None (severity)".
+
+    Innerhalb der Text-Anomalien wird zusaetzlich zwischen Severity
+    (context-severity-detector-service, hat severity_score) und Volumen
+    (context-volume-detector-service, hat similar_message_count)
+    unterschieden - beide haben ein "text"-Feld, aber unterschiedliche
+    Kennzahlen. Ohne diese Unterscheidung zeigte eine Volumen-Anomalie
+    faelschlich "High-severity message flagged (score: None)", weil
+    severity_score bei ihr schlicht nicht existiert.
     """
     text = payload.get("text")
     metric = payload.get("metric")
 
-    if text:
+    if text and "severity_score" in payload:
         return f"High-severity message flagged (score: {payload.get('severity_score')}): \"{text}\""
+    elif text and "similar_message_count" in payload:
+        count = payload.get("similar_message_count")
+        window = payload.get("time_window_minutes")
+        return f"{count} similar messages within {window} minutes: \"{text}\""
+    elif text:
+        return f"Anomalous message: \"{text}\""
     elif metric:
         return (
             f"{metric} changed from {payload.get('previous_value')} "
@@ -566,6 +606,7 @@ def build_anomaly_summary(payload: dict) -> str:
 def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) -> dict:
     payload = anomaly_envelope["payload"]
     anomaly_summary = build_anomaly_summary(payload)
+    anomaly_type = payload.get("anomaly_type")
 
     confident_candidates = [c for c in candidates if c["confidence"] >= CONFIDENCE_THRESHOLD][:SEARCH_LIMIT]
 
@@ -576,7 +617,7 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
         # eigentlich verworfenen, schwachen Treffern erfindet.
         for candidate in confident_candidates:
             candidate["explanation"] = generate_causal_explanation(
-                anomaly_summary, candidate["semantic_text"]
+                anomaly_summary, candidate["semantic_text"], anomaly_type
             )
 
         return {
@@ -603,7 +644,7 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
     if weak_candidates:
         for candidate in weak_candidates:
             candidate["explanation"] = generate_causal_explanation(
-                anomaly_summary, candidate["semantic_text"]
+                anomaly_summary, candidate["semantic_text"], anomaly_type
             )
 
         return {

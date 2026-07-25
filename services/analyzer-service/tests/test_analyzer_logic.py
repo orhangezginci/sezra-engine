@@ -490,6 +490,31 @@ class TestGenerateViaGemini:
 
 
 class TestGenerateCausalExplanation:
+    def test_volume_anomaly_uses_pattern_framing_not_causal(self, monkeypatch):
+        """
+        Regressionstest: bei anomaly_type="volume" darf der Prompt NICHT
+        "Moeglicher Ausloeser" (Ursache→Wirkung) fragen - die Kandidaten
+        sind gleichrangige Beispiele desselben Musters, nicht die
+        Ursache der Haeufung. Gefunden im Helpdesk-Demo: Erklaerungen
+        behaupteten faelschlich, ein Ticket haette die anderen 4
+        Tickets (inklusive sich selbst) verursacht.
+        """
+        captured = {}
+
+        def fake_post(url, json=None, timeout=None, headers=None, params=None):
+            captured["prompt"] = json["prompt"]
+            response = MagicMock()
+            response.json.return_value = {"response": "text"}
+            response.raise_for_status.return_value = None
+            return response
+
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        generate_causal_explanation("5 similar messages", "HELP-4471", "volume")
+
+        assert "Ausloeser" not in captured["prompt"]
+        assert "Muster" in captured["prompt"]
+
     def test_returns_generated_text(self, monkeypatch):
         fake_response = MagicMock()
         fake_response.json.return_value = {"response": "  Der frühere Beginn könnte zu weniger Schlaf geführt haben.  "}
@@ -758,6 +783,41 @@ class TestBuildInvestigationPayload:
 
         assert "None" not in result["anomaly_summary"]
         assert "Login nicht moeglich" in result["anomaly_summary"]
+
+    def test_volume_anomaly_summary_does_not_claim_severity(self):
+        """
+        Regressionstest: eine Volumen-Anomalie (context-volume-detector-
+        service) hat ebenfalls ein "text"-Feld, aber KEIN severity_score
+        - sondern similar_message_count. Ohne Unterscheidung zeigte die
+        Zusammenfassung faelschlich "High-severity message flagged
+        (score: None)" - gefunden im Helpdesk-Demo-Test mit einer
+        Ticket-Haeufung, bei der keine einzelne Nachricht selbst
+        dringlich war, nur ihre Anzahl auffaellig.
+        """
+        volume_envelope = {
+            "schema_version": "1.1",
+            "event_id": "6f9c2b1a-4e3a-4a3a-9c1a-2b1a4e3a4a3a",
+            "event_type": "AnomalyDetected",
+            "source": "context-volume-detector-service",
+            "occurred_at": "2026-07-25T10:00:00Z",
+            "project_id": "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a",
+            "payload": {
+                "anomaly_type": "volume",
+                "similar_message_count": 8,
+                "time_window_minutes": 60,
+                "text": "Passwort-Reset E-Mail kommt nicht an",
+                "reason": "8 similar messages received within 60 minutes, exceeding the volume threshold",
+                "source_event_id": "ticket-event-id",
+                "source_occurred_at": "2026-07-25T09:59:00Z",
+            },
+        }
+
+        result = build_investigation_payload(volume_envelope, [])
+
+        assert "High-severity" not in result["anomaly_summary"]
+        assert "None" not in result["anomaly_summary"]
+        assert "8" in result["anomaly_summary"]
+        assert "Passwort-Reset E-Mail kommt nicht an" in result["anomaly_summary"]
 
 
 class TestCreateInvestigationEvent:

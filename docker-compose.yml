@@ -241,6 +241,27 @@ services:
       GEMINI_GENERATION_MODEL: ${GEMINI_GENERATION_MODEL}
       SEVERITY_THRESHOLD: 0.8
 
+  context-volume-detector-service:
+    build:
+      context: .
+      dockerfile: services/context-volume-detector-service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      VOLUME_THRESHOLD: 5
+      VOLUME_SIMILARITY_THRESHOLD: 0.85
+      VOLUME_TIME_WINDOW_MINUTES: 60
+      VOLUME_SEARCH_LIMIT: 50
+
 volumes:
   postgres-data:
   qdrant-data:
