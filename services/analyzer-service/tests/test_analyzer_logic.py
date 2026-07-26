@@ -41,6 +41,7 @@ from main import (  # noqa: E402
     build_anomaly_search_text,
     build_investigation_payload,
     build_rerank_prompt,
+    build_timeline,
     create_embedding,
     create_investigation_event,
     generate_causal_explanation,
@@ -820,7 +821,66 @@ class TestBuildInvestigationPayload:
         assert "Passwort-Reset E-Mail kommt nicht an" in result["anomaly_summary"]
 
 
+class TestBuildTimeline:
+    def test_entries_sorted_chronologically(self):
+        causes = [
+            {"occurred_at": "2026-07-26T09:55:00Z", "semantic_text": "Redis-Fehler", "confidence": 0.9},
+            {"occurred_at": "2026-07-26T09:50:00Z", "semantic_text": "Deployment", "confidence": 0.9},
+        ]
+
+        timeline = build_timeline(ANOMALY_ENVELOPE, causes, [])
+
+        assert [e["occurred_at"] for e in timeline] == sorted(e["occurred_at"] for e in timeline)
+
+    def test_includes_anomaly_entry_with_source_occurred_at(self):
+        """
+        Nutzt source_occurred_at (der wahre urspruengliche Zeitpunkt),
+        nicht das AnomalyDetected-Wrapper-Envelope eigenes occurred_at -
+        gleiches Muster wie an anderer Stelle bereits etabliert.
+        """
+        timeline = build_timeline(ANOMALY_ENVELOPE, [], [])
+
+        anomaly_entries = [e for e in timeline if e["kind"] == "anomaly"]
+        assert len(anomaly_entries) == 1
+        assert anomaly_entries[0]["occurred_at"] == ANOMALY_ENVELOPE["payload"]["source_occurred_at"]
+
+    def test_weak_leads_get_their_own_kind(self):
+        weak_leads = [{"occurred_at": "2026-07-11T07:00:00Z", "semantic_text": "schwaches Signal", "confidence": 0.2}]
+
+        timeline = build_timeline(ANOMALY_ENVELOPE, [], weak_leads)
+
+        weak_entries = [e for e in timeline if e["kind"] == "weak_lead"]
+        assert len(weak_entries) == 1
+        assert weak_entries[0]["confidence"] == 0.2
+
+
 class TestCreateInvestigationEvent:
+    def test_timeline_gets_investigation_completed_entry_appended(self):
+        payload = build_investigation_payload(ANOMALY_ENVELOPE, [])
+        event = create_investigation_event(ANOMALY_ENVELOPE, payload)
+
+        completed_entries = [e for e in event["payload"]["timeline"] if e["kind"] == "investigation_completed"]
+        assert len(completed_entries) == 1
+
+    def test_timeline_stays_sorted_after_completion_entry_added(self):
+        candidates = [
+            {
+                "semantic_text": REKTOR_MAIL_TEXT,
+                "confidence": 0.87,
+                "source_event_id": "ctx-1",
+                "occurred_at": "2026-07-04T06:00:00Z",
+                "occurred_before_anomaly": True,
+            }
+        ]
+        payload = build_investigation_payload(ANOMALY_ENVELOPE, candidates)
+        event = create_investigation_event(ANOMALY_ENVELOPE, payload)
+
+        timeline = event["payload"]["timeline"]
+        assert [e["occurred_at"] for e in timeline] == sorted(e["occurred_at"] for e in timeline)
+        # Investigation-Abschluss muss der zeitlich letzte Eintrag sein,
+        # da er ja tatsaechlich nach allem anderen passiert.
+        assert timeline[-1]["kind"] == "investigation_completed"
+
     def test_causation_id_points_to_anomaly_event(self):
         payload = build_investigation_payload(ANOMALY_ENVELOPE, [])
         event = create_investigation_event(ANOMALY_ENVELOPE, payload)

@@ -603,6 +603,47 @@ def build_anomaly_summary(payload: dict) -> str:
     return "Anomaly detected."
 
 
+def build_timeline(anomaly_envelope: dict, causes: list[dict], weak_leads: list[dict]) -> list[dict]:
+    """
+    Baut die vollstaendige, bereits SORTIERTE Zeitleiste eines Falls -
+    bewusst hier in der Engine, nicht im Frontend. Prinzip: Studio zeigt
+    nur an, was die Engine bereits entschieden hat, trifft selbst keine
+    zeitliche oder kausale Einordnung (kein correlation_id-Rueckschluss,
+    kein eigenes Sortieren). Jeder Eintrag traegt "kind" (Studio bildet
+    das nur auf eine Farbe/Icon ab, entscheidet nichts inhaltlich
+    daraus) statt dass Studio selbst zwischen Ursache/Anomalie/Abschluss
+    unterscheiden muesste.
+    """
+    payload = anomaly_envelope["payload"]
+    anomaly_occurred_at = payload.get("source_occurred_at", anomaly_envelope["occurred_at"])
+    anomaly_summary = build_anomaly_summary(payload)
+
+    entries = []
+    for cause in causes:
+        entries.append({
+            "kind": "cause",
+            "occurred_at": cause["occurred_at"],
+            "description": cause["semantic_text"],
+            "confidence": cause["confidence"],
+        })
+    for lead in weak_leads:
+        entries.append({
+            "kind": "weak_lead",
+            "occurred_at": lead["occurred_at"],
+            "description": lead["semantic_text"],
+            "confidence": lead["confidence"],
+        })
+    entries.append({
+        "kind": "anomaly",
+        "occurred_at": anomaly_occurred_at,
+        "description": anomaly_summary,
+        "confidence": None,
+    })
+
+    entries.sort(key=lambda e: e["occurred_at"])
+    return entries
+
+
 def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) -> dict:
     payload = anomaly_envelope["payload"]
     anomaly_summary = build_anomaly_summary(payload)
@@ -624,6 +665,7 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
             "anomaly_summary": anomaly_summary,
             "possible_causes": confident_candidates,
             "weak_leads": [],
+            "timeline": build_timeline(anomaly_envelope, confident_candidates, []),
             "confidence_note": (
                 "Results reflect an LLM's judgment of causal plausibility, "
                 "not proven causality."
@@ -651,6 +693,7 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
             "anomaly_summary": anomaly_summary,
             "possible_causes": [],
             "weak_leads": weak_candidates,
+            "timeline": build_timeline(anomaly_envelope, [], weak_candidates),
             "confidence_note": (
                 f"No cause reached the confidence threshold ({CONFIDENCE_THRESHOLD}), "
                 "but weak leads below that threshold are listed separately - "
@@ -662,6 +705,7 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
         "anomaly_summary": anomaly_summary,
         "possible_causes": [],
         "weak_leads": [],
+        "timeline": build_timeline(anomaly_envelope, [], []),
         "confidence_note": (
             "No context above the noise floor "
             f"({NOISE_FLOOR}) was found. This does not mean there is no "
@@ -673,13 +717,31 @@ def build_investigation_payload(anomaly_envelope: dict, candidates: list[dict]) 
 
 def create_investigation_event(anomaly_envelope: dict, investigation_payload: dict) -> dict:
     anomaly_event_id = anomaly_envelope["event_id"]
+    occurred_at = datetime.now(timezone.utc).isoformat()
+
+    # Zeitleiste wird HIER, von der Engine selbst, um den Abschluss-
+    # Zeitpunkt ergaenzt und final sortiert - Studio zeigt nur an, trifft
+    # keine eigene zeitliche Einordnung (siehe build_timeline).
+    timeline = investigation_payload.get("timeline", [])
+    timeline.append({
+        "kind": "investigation_completed",
+        "occurred_at": occurred_at,
+        "description": (
+            f"{len(investigation_payload.get('possible_causes', []))} Ursache(n) gefunden"
+            if investigation_payload.get("possible_causes")
+            else "Untersuchung abgeschlossen"
+        ),
+        "confidence": None,
+    })
+    timeline.sort(key=lambda e: e["occurred_at"])
+    investigation_payload["timeline"] = timeline
 
     return {
         "schema_version": "1.1",
         "event_id": str(uuid4()),
         "event_type": "InvestigationGenerated",
         "source": SERVICE_NAME,
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": occurred_at,
         "correlation_id": anomaly_envelope.get("correlation_id") or anomaly_event_id,
         "causation_id": anomaly_event_id,
         "project_id": anomaly_envelope.get("project_id"),
