@@ -89,7 +89,18 @@ def build_envelope(raw_data: dict, source_type: str) -> dict:
     Wie json-adapter-service's build_envelope, aber source_type kommt
     vom Endpoint (Pfad /observations vs. /context), nicht aus einem
     Feld in raw_data - eindeutig statt interpretationsbeduerftig.
+
+    project_id ist optional pro Anfrage ueberschreibbar (z. B. fuer
+    mehrere Analyseprojekte auf derselben Instanz, siehe Studio-
+    Anforderung) - faellt auf SEZRA_PROJECT_ID zurueck, wenn nicht
+    angegeben, voll rueckwaertskompatibel zu bestehenden Aufrufen ohne
+    dieses Feld. Wird VOR dem Payload-Merge herausgeloest, sonst wuerde
+    die Projekt-ID versehentlich mit in den semantischen Text
+    eingebettet (derselbe Fehlertyp wie frueher bei source_event_type).
     """
+    raw_data = dict(raw_data)  # Kopie - das Original der Anfrage nicht mutieren
+    project_id = raw_data.pop("project_id", None) or SEZRA_PROJECT_ID
+
     payload = {**raw_data, "source_type": source_type}
     event_type = SOURCE_TYPE_TO_EVENT_TYPE[source_type]
     event_id = str(uuid4())
@@ -100,7 +111,7 @@ def build_envelope(raw_data: dict, source_type: str) -> dict:
         "event_type": event_type,
         "source": SERVICE_NAME,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
-        "project_id": SEZRA_PROJECT_ID,
+        "project_id": project_id,
         # Selbstreferenziell: siehe json-adapter-service main.py fuer die
         # ausfuehrliche Begruendung - ohne das faengt keine Korrelations-
         # Kette bei ihrem eigentlichen Ursprung an.
@@ -166,7 +177,7 @@ def post_context(raw_data: dict):
 
 
 @app.get("/investigations")
-def get_investigations(limit: int = 20):
+def get_investigations(limit: int = 20, project_id: str | None = None):
     """
     Drei Prioritaetsstufen statt nur "Ursache gefunden vs. nicht":
 
@@ -187,6 +198,14 @@ def get_investigations(limit: int = 20):
     dass deviation-detector-service oder analyzer-service voneinander
     wissen muessen - haelt die Services entkoppelt.
 
+    project_id filtert optional auf ein einzelnes Analyseprojekt -
+    faellt der Filter weg, werden Investigations projektuebergreifend
+    zurueckgegeben (bisheriges Verhalten, unveraendert). Filterung
+    passiert bereits in der SQL-Abfrage, nicht erst danach in Python -
+    dadurch bleibt auch der Kreuzverweis-Mechanismus (Stufe 3) korrekt
+    auf das gefilterte Projekt beschraenkt, statt versehentlich
+    Ursachen aus einem ANDEREN Projekt als "erklaert durch" anzuzeigen.
+
     Holt grosszuegig mehr Zeilen als angefordert (Kreuzverweis-Analyse
     braucht den vollen Kontext, nicht nur die ersten `limit` Zeilen -
     sonst koennte die erklaerende Investigation ausserhalb der
@@ -196,16 +215,29 @@ def get_investigations(limit: int = 20):
     connection = connect_to_postgres()
     try:
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT event_id, correlation_id, causation_id, occurred_at,
-                       received_at, project_id, payload
-                FROM events
-                WHERE event_type = 'InvestigationGenerated'
-                ORDER BY received_at DESC
-                LIMIT 500
-                """,
-            )
+            if project_id:
+                cursor.execute(
+                    """
+                    SELECT event_id, correlation_id, causation_id, occurred_at,
+                           received_at, project_id, payload
+                    FROM events
+                    WHERE event_type = 'InvestigationGenerated' AND project_id = %s
+                    ORDER BY received_at DESC
+                    LIMIT 500
+                    """,
+                    (project_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT event_id, correlation_id, causation_id, occurred_at,
+                           received_at, project_id, payload
+                    FROM events
+                    WHERE event_type = 'InvestigationGenerated'
+                    ORDER BY received_at DESC
+                    LIMIT 500
+                    """,
+                )
             rows = cursor.fetchall()
     finally:
         connection.close()
@@ -246,19 +278,31 @@ def get_investigations(limit: int = 20):
 
 
 @app.get("/investigations/{event_id}")
-def get_investigation(event_id: str):
+def get_investigation(event_id: str, project_id: str | None = None):
     connection = connect_to_postgres()
     try:
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT event_id, correlation_id, occurred_at, received_at,
-                       project_id, payload
-                FROM events
-                WHERE event_type = 'InvestigationGenerated' AND event_id = %s
-                """,
-                (event_id,),
-            )
+            if project_id:
+                cursor.execute(
+                    """
+                    SELECT event_id, correlation_id, occurred_at, received_at,
+                           project_id, payload
+                    FROM events
+                    WHERE event_type = 'InvestigationGenerated' AND event_id = %s
+                          AND project_id = %s
+                    """,
+                    (event_id, project_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT event_id, correlation_id, occurred_at, received_at,
+                           project_id, payload
+                    FROM events
+                    WHERE event_type = 'InvestigationGenerated' AND event_id = %s
+                    """,
+                    (event_id,),
+                )
             row = cursor.fetchone()
     finally:
         connection.close()
@@ -273,6 +317,7 @@ def get_investigation(event_id: str):
 def get_events(
     event_type: str | None = None,
     correlation_id: str | None = None,
+    project_id: str | None = None,
     limit: int = 50,
 ):
     """
@@ -281,7 +326,8 @@ def get_events(
     daraus entstandene Investigation gehoeren alle zur selben
     correlation_id (additiv durch die Pipeline durchgereicht, siehe
     contracts/README.md). Kombinierbar mit event_type, um z. B. gezielt
-    nur die Anomalie einer bestimmten Kette zu holen.
+    nur die Anomalie einer bestimmten Kette zu holen. project_id filtert
+    optional auf ein einzelnes Analyseprojekt, analog zu /investigations.
     """
     conditions = []
     params: list = []
@@ -292,6 +338,9 @@ def get_events(
     if correlation_id:
         conditions.append("correlation_id = %s")
         params.append(correlation_id)
+    if project_id:
+        conditions.append("project_id = %s")
+        params.append(project_id)
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.append(limit)
@@ -315,6 +364,27 @@ def get_events(
         connection.close()
 
     return JSONResponse(content=json.loads(json.dumps(rows, default=str)))
+
+
+@app.get("/projects")
+def get_projects():
+    """
+    Listet alle tatsaechlich vorhandenen project_id-Werte auf - ohne
+    diesen Endpunkt haette ein Client (z. B. SEZRA Studio) keine
+    Moeglichkeit, die verfuegbaren Analyseprojekte ueberhaupt zu
+    entdecken, um z. B. einen Projekt-Umschalter zu befuellen.
+    """
+    connection = connect_to_postgres()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT DISTINCT project_id FROM events WHERE project_id IS NOT NULL ORDER BY project_id"
+            )
+            rows = cursor.fetchall()
+    finally:
+        connection.close()
+
+    return JSONResponse(content=[row[0] for row in rows])
 
 
 @app.get("/health")

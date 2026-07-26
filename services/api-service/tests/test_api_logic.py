@@ -74,6 +74,28 @@ class TestBuildEnvelope:
 
         assert envelope["correlation_id"] == envelope["event_id"]
 
+    def test_explicit_project_id_overrides_default(self):
+        envelope = build_envelope({"value": 1, "project_id": "kunde-a-lager"}, "observation")
+
+        assert envelope["project_id"] == "kunde-a-lager"
+
+    def test_project_id_is_not_leaked_into_payload(self):
+        """
+        project_id wird VOR dem Payload-Merge herausgeloest - sonst
+        wuerde sie versehentlich mit in den semantischen Text
+        eingebettet (derselbe Fehlertyp wie frueher bei
+        source_event_type in vectorizing-service).
+        """
+        envelope = build_envelope({"value": 1, "project_id": "kunde-a-lager"}, "observation")
+
+        assert "project_id" not in envelope["payload"]
+
+    def test_build_envelope_does_not_mutate_input(self):
+        raw_data = {"value": 1, "project_id": "kunde-a-lager"}
+        build_envelope(raw_data, "observation")
+
+        assert raw_data == {"value": 1, "project_id": "kunde-a-lager"}
+
 
 class TestPostEndpoints:
     def test_post_observation_publishes_and_returns_event_id(self, monkeypatch):
@@ -129,6 +151,24 @@ class TestPostEndpoints:
         client.post("/observations", json={"value": 1})
 
         fake_connection.close.assert_called_once()
+
+    def test_post_observation_accepts_optional_project_id(self, monkeypatch):
+        captured = {}
+
+        def fake_publish(exchange, routing_key, body, properties=None):
+            captured["envelope"] = json.loads(body)
+
+        fake_channel = MagicMock()
+        fake_channel.basic_publish.side_effect = fake_publish
+        fake_connection = MagicMock()
+        fake_connection.channel.return_value = fake_channel
+        monkeypatch.setattr(main, "connect_to_rabbitmq", lambda: fake_connection)
+
+        client = TestClient(app)
+        client.post("/observations", json={"value": 1, "project_id": "kunde-a-lager"})
+
+        assert captured["envelope"]["project_id"] == "kunde-a-lager"
+        assert "project_id" not in captured["envelope"]["payload"]
 
 
 class TestGetEndpoints:
@@ -378,6 +418,106 @@ class TestGetEndpoints:
         response = client.get("/investigations")
 
         assert response.json()[0]["correlation_id"] == "corr-1"
+
+    def test_get_investigations_filters_by_project_id_when_given(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = []
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/investigations?project_id=kunde-a-lager")
+
+        assert response.status_code == 200
+        call_args = fake_cursor.execute.call_args
+        assert "project_id = %s" in call_args[0][0]
+        assert "kunde-a-lager" in call_args[0][1]
+
+    def test_get_investigations_without_project_id_stays_unfiltered(self, monkeypatch):
+        """
+        Rueckwaertskompatibilitaet: ohne project_id-Parameter bleibt das
+        Verhalten unveraendert - projektuebergreifend, wie bisher.
+        """
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = []
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/investigations")
+
+        assert response.status_code == 200
+        call_args = fake_cursor.execute.call_args
+        assert "project_id = %s" not in call_args[0][0]
+
+    def test_get_events_filters_by_project_id_when_given(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = []
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/events?project_id=kunde-a-lager")
+
+        assert response.status_code == 200
+        call_args = fake_cursor.execute.call_args
+        assert "project_id = %s" in call_args[0][0]
+        assert "kunde-a-lager" in call_args[0][1]
+
+    def test_get_investigation_by_id_filters_by_project_id_when_given(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchone.return_value = {
+            "event_id": "abc",
+            "correlation_id": "c1",
+            "occurred_at": "2026-01-01T00:00:00Z",
+            "received_at": "2026-01-01T00:00:01Z",
+            "project_id": "kunde-a-lager",
+            "payload": {},
+        }
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/investigations/abc?project_id=kunde-a-lager")
+
+        assert response.status_code == 200
+        call_args = fake_cursor.execute.call_args
+        assert "project_id = %s" in call_args[0][0]
+
+
+class TestGetProjects:
+    def test_returns_distinct_project_ids(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = [("kunde-a-lager",), ("kunde-b-checkout",)]
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.get("/projects")
+
+        assert response.status_code == 200
+        assert response.json() == ["kunde-a-lager", "kunde-b-checkout"]
+
 
 
 class TestHealth:
