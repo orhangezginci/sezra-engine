@@ -27,6 +27,14 @@ POLL_INTERVAL_SECONDS=3
 POLL_TIMEOUT_SECONDS=210
 STACK_READY_TIMEOUT_SECONDS=180
 CONSUMER_READY_TIMEOUT_SECONDS=60
+# Metrik-zu-Metrik-Szenario: Ursache- UND Wirkung-Metrik loesen je eine
+# eigene Anomalie/Investigation aus - erst wenn beide vorliegen, ist die
+# Sortierung (Ursache-gefunden zuerst) zuverlaessig vollstaendig. Ohne
+# das koennte ein Nutzer zufaellig nur die schneller fertige, aber
+# weniger interessante Investigation sehen (die des Ursprungs-Ereignisses
+# ohne eigene Ursache) und faelschlich denken, SEZRA haette nichts
+# gefunden.
+EXPECTED_INVESTIGATION_COUNT=2
 
 CONSUMER_QUEUES="sezra.queue.ingestion-service sezra.queue.knowledge-service sezra.queue.vectorizing-service sezra.queue.deviation-detector-service sezra.queue.persistence-service sezra.queue.analyzer-service"
 
@@ -187,25 +195,37 @@ echo "4/4 Stoerungsrate der Radiobeobachtungen steigt an (Anomalie)..."
 post_observation '{"metric": "radio_frequency_interference_rate", "value": 24.8}'
 
 echo ""
-echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
+echo "Warte auf ${EXPECTED_INVESTIGATION_COUNT} Investigation-Ergebnisse (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
+echo "    (Metrik-zu-Metrik-Szenario: sowohl Ursache- als auch Wirkung-Metrik"
+echo "    loesen jeweils eine eigene Anomalie aus - erst wenn BEIDE fertig"
+echo "    analysiert sind, ist die Sortierung zuverlaessig vollstaendig)"
 
 elapsed=0
-result=""
+count=0
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+  count=$(curl -s "$API_URL/investigations?limit=10" 2>/dev/null \
+    | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
-  if [ -n "$result" ] && [ "$result" != "[]" ]; then
+  if [ "$count" -ge "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
     break
   fi
 
   sleep "$POLL_INTERVAL_SECONDS"
   elapsed=$((elapsed + POLL_INTERVAL_SECONDS))
-  result=""
 done
 
 echo ""
-if [ -z "$result" ]; then
-  echo "Kein Investigation-Ergebnis innerhalb von ${POLL_TIMEOUT_SECONDS}s gefunden."
+if [ "$count" -lt "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
+  echo "Nur ${count} von ${EXPECTED_INVESTIGATION_COUNT} erwarteten Investigations"
+  echo "innerhalb von ${POLL_TIMEOUT_SECONDS}s gefunden - zeige trotzdem das bisher"
+  echo "vorliegende Ergebnis, moeglicherweise noch nicht vollstaendig sortiert."
+  echo "Pruefe manuell: docker compose logs deviation-detector-service analyzer-service"
+fi
+
+result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+
+if [ -z "$result" ] || [ "$result" = "[]" ]; then
+  echo "Kein Investigation-Ergebnis gefunden."
   echo "Pruefe manuell: docker compose logs deviation-detector-service analyzer-service"
   exit 1
 fi

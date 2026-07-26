@@ -1,17 +1,23 @@
 #!/bin/bash
 set -e
 
-# Demo-Szenario: technischer Fehler im Checkout -> Einbruch der
-# Conversion-Rate. Testet den bisher nur simulierten Metrik-zu-Metrik-Fall
-# (checkout_error_rate als andere Beobachtungsreihe erklaert
-# conversion_rate) live end-to-end, im Gegensatz zum School-Szenario
-# (Metrik-zu-Text).
+# Demo-Szenario: ueberfaellige Geraetekalibrierung fuehrt zu einer
+# erhoehten Fehlerrate bei Infusionspumpen - ein "Predictive
+# Maintenance"-Muster (haeufiger, aktuell viel diskutierter Anwendungsfall
+# in der Medizintechnik). Bewusst KEINE Firmware-/Geraeteaenderung selbst
+# als Ursache (das waere FDA/MDR-reguliertes Change-Control-Terrain,
+# unrealistisch als beilaeufiger Systemeintrag) - stattdessen reine
+# Wartungsbetrieb-Kennzahl (durchschnittliche Ueberfaelligkeit der
+# Kalibrierung in der Geraeteflotte), die Kliniktechnik-Abteilungen
+# tatsaechlich als KPI tracken, ohne dass am Geraet selbst etwas
+# veraendert wird.
 #
-# Startet den kompletten Stack sauber (down + gezieltes Leeren von
-# Postgres/Qdrant, ollama-data bleibt erhalten), reicht Baseline-Werte
-# fuer beide Metriken sowie den Checkout-Fehler-Spike und den
-# Conversion-Rate-Abfall per HTTP ein, wartet auf und zeigt das
-# Investigation-Ergebnis.
+# Metrik-zu-Metrik-Muster wie E-Commerce/Pharma-Logistik/Astrophysik:
+# avg_days_since_last_calibration (Ursache) -> infusion_pump_error_rate
+# (Anomalie). Bewusst KEIN Patientenbezug - reine Geraete-/
+# Wartungsebene, SEZRA praesentiert sich als technisches
+# Hinweissystem fuer die Kliniktechnik, nicht als klinisches
+# Alarmsystem.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -56,11 +62,10 @@ if [ -z "$RABBITMQ_USER" ] || [ -z "$RABBITMQ_PASSWORD" ]; then
   exit 1
 fi
 
-echo "=== SEZRA Demo: E-Commerce Scenario (Metrik -> Metrik) ==="
+echo "=== SEZRA Demo: MedTech - Predictive Maintenance (Metrik -> Metrik) ==="
 echo ""
 
 echo "0/4 Stack wird neu gestartet (down + up --build)..."
-echo "    Hinweis: ollama-data bleibt erhalten (kein erneuter Modell-Download)."
 docker compose down > /dev/null 2>&1 || true
 docker compose up --build -d $STACK_SERVICES
 
@@ -170,24 +175,24 @@ post_observation() {
     -d "$1" > /dev/null
 }
 
-echo "1/4 Baseline: checkout_error_rate (stabil, ~2%)..."
-for value in 2.1 1.9 2.0 2.2 1.8; do
-  post_observation "{\"metric\": \"checkout_error_rate\", \"value\": $value}"
+echo "1/4 Baseline: avg_days_since_last_calibration (stabil, ~15 Tage)..."
+for value in 14 16 15 15 17; do
+  post_observation "{\"metric\": \"avg_days_since_last_calibration\", \"value\": $value}"
   sleep 3
 done
 
-echo "2/4 Baseline: conversion_rate (stabil, ~3.5%)..."
-for value in 3.4 3.6 3.5 3.4 3.6; do
-  post_observation "{\"metric\": \"conversion_rate\", \"value\": $value}"
+echo "2/4 Baseline: infusion_pump_error_rate (stabil, ~0.8%)..."
+for value in 0.7 0.9 0.8 0.7 0.9; do
+  post_observation "{\"metric\": \"infusion_pump_error_rate\", \"value\": $value}"
   sleep 3
 done
 
-echo "3/4 Checkout-Fehler-Spike (Ursache)..."
-post_observation '{"metric": "checkout_error_rate", "value": 27.5}'
+echo "3/4 Kalibrierungs-Rueckstand steigt deutlich an (Ursache)..."
+post_observation '{"metric": "avg_days_since_last_calibration", "value": 68}'
 sleep 8
 
-echo "4/4 Conversion-Rate-Einbruch (Anomalie)..."
-post_observation '{"metric": "conversion_rate", "value": 1.1}'
+echo "4/4 Pumpen-Fehlerrate steigt an (Anomalie)..."
+post_observation '{"metric": "infusion_pump_error_rate", "value": 6.4}'
 
 echo ""
 echo "Warte auf ${EXPECTED_INVESTIGATION_COUNT} Investigation-Ergebnisse (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
