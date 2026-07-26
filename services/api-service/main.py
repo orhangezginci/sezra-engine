@@ -366,25 +366,54 @@ def get_events(
     return JSONResponse(content=json.loads(json.dumps(rows, default=str)))
 
 
-@app.get("/projects")
-def get_projects():
+@app.post("/projects")
+def post_project(raw_data: dict):
     """
-    Listet alle tatsaechlich vorhandenen project_id-Werte auf - ohne
-    diesen Endpunkt haette ein Client (z. B. SEZRA Studio) keine
-    Moeglichkeit, die verfuegbaren Analyseprojekte ueberhaupt zu
-    entdecken, um z. B. einen Projekt-Umschalter zu befuellen.
+    Legt ein neues Analyseprojekt an - der Nutzer gibt nur einen
+    lesbaren Namen an, die Engine generiert die UUID. sezra-engine
+    selbst (Pipeline, Detektoren) kommt weiterhin ausschliesslich mit
+    UUIDs aus und braucht nie einen lesbaren Namen - das ist bewusst
+    ein reines api-service/Studio-Anliegen, keine Pipeline-Aenderung.
     """
+    name = raw_data.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Missing required field: name")
+
+    project_id = str(uuid4())
+
     connection = connect_to_postgres()
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT DISTINCT project_id FROM events WHERE project_id IS NOT NULL ORDER BY project_id"
+                "INSERT INTO projects (id, name) VALUES (%s, %s)",
+                (project_id, name),
             )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return {"id": project_id, "name": name}
+
+
+@app.get("/projects")
+def get_projects():
+    """
+    Liest aus der projects-Tabelle (echte Quelle der Wahrheit fuer
+    "welche Projekte gibt es, wie heissen sie"), NICHT mehr abgeleitet
+    aus vorhandenen events - ein frisch angelegtes, noch leeres Projekt
+    (per POST /projects) waere dort sonst schlicht nicht aufgetaucht,
+    bevor die erste Beobachtung/Kontext-Nachricht dafuer eingereicht
+    wurde.
+    """
+    connection = connect_to_postgres()
+    try:
+        with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute("SELECT id, name, created_at FROM projects ORDER BY created_at DESC")
             rows = cursor.fetchall()
     finally:
         connection.close()
 
-    return JSONResponse(content=[row[0] for row in rows])
+    return JSONResponse(content=json.loads(json.dumps(rows, default=str)))
 
 
 @app.get("/health")

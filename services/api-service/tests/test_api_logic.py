@@ -165,9 +165,9 @@ class TestPostEndpoints:
         monkeypatch.setattr(main, "connect_to_rabbitmq", lambda: fake_connection)
 
         client = TestClient(app)
-        client.post("/observations", json={"value": 1, "project_id": "kunde-a-lager"})
+        client.post("/observations", json={"value": 1, "project_id": "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"})
 
-        assert captured["envelope"]["project_id"] == "kunde-a-lager"
+        assert captured["envelope"]["project_id"] == "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
         assert "project_id" not in captured["envelope"]["payload"]
 
 
@@ -501,10 +501,50 @@ class TestGetEndpoints:
         assert "project_id = %s" in call_args[0][0]
 
 
-class TestGetProjects:
-    def test_returns_distinct_project_ids(self, monkeypatch):
+class TestProjects:
+    def test_post_project_generates_uuid_and_inserts(self, monkeypatch):
         fake_cursor = MagicMock()
-        fake_cursor.fetchall.return_value = [("kunde-a-lager",), ("kunde-b-checkout",)]
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.post("/projects", json={"name": "Kunde A - Lager"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "Kunde A - Lager"
+        assert len(body["id"]) == 36  # UUID-Format, grobe Plausibilitaetspruefung
+        fake_cursor.execute.assert_called_once()
+        assert "INSERT INTO projects" in fake_cursor.execute.call_args[0][0]
+        fake_connection.commit.assert_called_once()
+
+    def test_post_project_without_name_returns_400(self):
+        client = TestClient(app)
+        response = client.post("/projects", json={})
+
+        assert response.status_code == 400
+
+    def test_post_project_with_blank_name_returns_400(self):
+        client = TestClient(app)
+        response = client.post("/projects", json={"name": "   "})
+
+        assert response.status_code == 400
+
+    def test_get_projects_returns_rows_from_table(self, monkeypatch):
+        """
+        Liest aus der projects-Tabelle, NICHT mehr abgeleitet aus
+        events - ein frisch angelegtes, noch leeres Projekt muss
+        erscheinen, auch ohne dass dafuer bereits eine Beobachtung
+        eingereicht wurde.
+        """
+        fake_cursor = MagicMock()
+        fake_cursor.fetchall.return_value = [
+            {"id": "uuid-a", "name": "Kunde A - Lager", "created_at": "2026-07-26T00:00:00Z"},
+        ]
         fake_cursor.__enter__ = lambda self: fake_cursor
         fake_cursor.__exit__ = lambda self, *a: None
 
@@ -516,7 +556,7 @@ class TestGetProjects:
         response = client.get("/projects")
 
         assert response.status_code == 200
-        assert response.json() == ["kunde-a-lager", "kunde-b-checkout"]
+        assert response.json()[0]["name"] == "Kunde A - Lager"
 
 
 
