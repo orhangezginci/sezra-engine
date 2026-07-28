@@ -19,6 +19,10 @@ set -e
 # leo_satellite_pass_count (Ursache) -> radio_frequency_interference_rate
 # (Anomalie).
 #
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung).
+#
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
 API_URL="http://localhost:8000"
@@ -160,6 +164,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: Astro-Satellites - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -177,22 +198,22 @@ post_observation() {
 
 echo "1/4 Baseline: leo_satellite_pass_count (stabil, ~12 pro Beobachtungsfenster)..."
 for value in 11 13 12 12 14; do
-  post_observation "{\"metric\": \"leo_satellite_pass_count\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"leo_satellite_pass_count\", \"value\": $value}"
   sleep 3
 done
 
 echo "2/4 Baseline: radio_frequency_interference_rate (stabil, ~2.5%)..."
 for value in 2.3 2.6 2.4 2.5 2.7; do
-  post_observation "{\"metric\": \"radio_frequency_interference_rate\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"radio_frequency_interference_rate\", \"value\": $value}"
   sleep 3
 done
 
 echo "3/4 Satelliten-Durchgangsrate steigt deutlich (neue Konstellations-Charge, Ursache)..."
-post_observation '{"metric": "leo_satellite_pass_count", "value": 68}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"leo_satellite_pass_count\", \"value\": 68}"
 sleep 8
 
 echo "4/4 Stoerungsrate der Radiobeobachtungen steigt an (Anomalie)..."
-post_observation '{"metric": "radio_frequency_interference_rate", "value": 24.8}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"radio_frequency_interference_rate\", \"value\": 24.8}"
 
 echo ""
 echo "Warte auf ${EXPECTED_INVESTIGATION_COUNT} Investigation-Ergebnisse (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -203,7 +224,7 @@ echo "    analysiert sind, ist die Sortierung zuverlaessig vollstaendig)"
 elapsed=0
 count=0
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  count=$(curl -s "$API_URL/investigations?limit=10" 2>/dev/null \
+  count=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=10" 2>/dev/null \
     | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
   if [ "$count" -ge "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
@@ -222,7 +243,7 @@ if [ "$count" -lt "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
   echo "Pruefe manuell: docker compose logs deviation-detector-service analyzer-service"
 fi
 
-result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
 if [ -z "$result" ] || [ "$result" = "[]" ]; then
   echo "Kein Investigation-Ergebnis gefunden."
