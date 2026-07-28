@@ -14,6 +14,10 @@ set -e
 # identischer "Passwort-Reset"-Tickets, die den Volumen-Schwellwert
 # (Default 5) ueberschreiten sollte.
 #
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung).
+#
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
 API_URL="http://localhost:8000"
@@ -147,6 +151,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: Helpdesk - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -163,29 +184,29 @@ post_ticket() {
 }
 
 echo "1/2 Hintergrundrauschen: thematisch unabhaengige Tickets werden eingereicht..."
-post_ticket '{"issue_key": "HELP-4001", "summary": "Drucker im 2. Stock druckt nicht mehr", "reporter": "a.wagner@company.com", "priority": "Low"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4001\", \"summary\": \"Drucker im 2. Stock druckt nicht mehr\", \"reporter\": \"a.wagner@company.com\", \"priority\": \"Low\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4002", "summary": "Bitte Zugriff auf Shared Drive Marketing freischalten", "reporter": "l.becker@company.com", "priority": "Low"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4002\", \"summary\": \"Bitte Zugriff auf Shared Drive Marketing freischalten\", \"reporter\": \"l.becker@company.com\", \"priority\": \"Low\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4003", "summary": "VPN-Verbindung bricht gelegentlich ab", "reporter": "t.hoffmann@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4003\", \"summary\": \"VPN-Verbindung bricht gelegentlich ab\", \"reporter\": \"t.hoffmann@company.com\", \"priority\": \"Medium\"}"
 sleep 3
 
 echo "2/2 Haeufung fast identischer Passwort-Reset-Tickets wird eingereicht..."
-post_ticket '{"issue_key": "HELP-4471", "summary": "Passwort-Reset E-Mail kommt nicht an", "reporter": "m.schmidt@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4471\", \"summary\": \"Passwort-Reset E-Mail kommt nicht an\", \"reporter\": \"m.schmidt@company.com\", \"priority\": \"Medium\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4472", "summary": "Passwort zuruecksetzen funktioniert nicht, keine E-Mail erhalten", "reporter": "s.fischer@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4472\", \"summary\": \"Passwort zuruecksetzen funktioniert nicht, keine E-Mail erhalten\", \"reporter\": \"s.fischer@company.com\", \"priority\": \"Medium\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4473", "summary": "Kann mein Passwort nicht zuruecksetzen, E-Mail fehlt", "reporter": "j.weber@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4473\", \"summary\": \"Kann mein Passwort nicht zuruecksetzen, E-Mail fehlt\", \"reporter\": \"j.weber@company.com\", \"priority\": \"Medium\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4474", "summary": "Passwort-Reset-Mail kommt einfach nicht an", "reporter": "n.klein@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4474\", \"summary\": \"Passwort-Reset-Mail kommt einfach nicht an\", \"reporter\": \"n.klein@company.com\", \"priority\": \"Medium\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4475", "summary": "Passwort vergessen - Reset-E-Mail wird nicht zugestellt", "reporter": "c.wolf@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4475\", \"summary\": \"Passwort vergessen - Reset-E-Mail wird nicht zugestellt\", \"reporter\": \"c.wolf@company.com\", \"priority\": \"Medium\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4476", "summary": "Erhalte keine E-Mail beim Passwort-Reset-Versuch", "reporter": "p.schroeder@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4476\", \"summary\": \"Erhalte keine E-Mail beim Passwort-Reset-Versuch\", \"reporter\": \"p.schroeder@company.com\", \"priority\": \"Medium\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4477", "summary": "Passwort-Reset-Funktion sendet keine Bestaetigungsmail", "reporter": "d.zimmermann@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4477\", \"summary\": \"Passwort-Reset-Funktion sendet keine Bestaetigungsmail\", \"reporter\": \"d.zimmermann@company.com\", \"priority\": \"Medium\"}"
 sleep 3
-post_ticket '{"issue_key": "HELP-4478", "summary": "Keine Reset-Mail nach Klick auf Passwort vergessen erhalten", "reporter": "r.krueger@company.com", "priority": "Medium"}'
+post_ticket "{\"project_id\": \"$PROJECT_ID\", \"issue_key\": \"HELP-4478\", \"summary\": \"Keine Reset-Mail nach Klick auf Passwort vergessen erhalten\", \"reporter\": \"r.krueger@company.com\", \"priority\": \"Medium\"}"
 
 echo ""
 echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -193,7 +214,7 @@ echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
 elapsed=0
 result=""
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  result=$(curl -s "$API_URL/investigations?limit=5" 2>/dev/null || true)
+  result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=5" 2>/dev/null || true)
 
   if [ -n "$result" ] && [ "$result" != "[]" ]; then
     break
