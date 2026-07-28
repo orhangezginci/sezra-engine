@@ -14,11 +14,12 @@ set -e
 # Handel: customs_clearance_delay_hours (Ursache) -> 
 # cold_chain_temperature_excursion_rate (Anomalie).
 #
-# Startet den kompletten Stack sauber (down + gezieltes Leeren von
-# Postgres/Qdrant, ollama-data bleibt erhalten, falls vorhanden), reicht
-# Baseline-Werte fuer beide Metriken sowie den Zoll-Verzoegerungs-Anstieg
-# und den Kuehlketten-Uebershreitungs-Anstieg per HTTP ein, wartet auf
-# und zeigt das Investigation-Ergebnis.
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung), reicht Baseline-Werte fuer beide Metriken
+# sowie den Zoll-Verzoegerungs-Anstieg und den Kuehlketten-
+# Uebershreitungs-Anstieg per HTTP ein, wartet auf und zeigt das
+# Investigation-Ergebnis.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -161,6 +162,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: Pharma-Logistik - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -178,22 +196,22 @@ post_observation() {
 
 echo "1/4 Baseline: customs_clearance_delay_hours (stabil, ~4h)..."
 for value in 3.8 4.1 4.0 3.9 4.2; do
-  post_observation "{\"metric\": \"customs_clearance_delay_hours\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"customs_clearance_delay_hours\", \"value\": $value}"
   sleep 3
 done
 
 echo "2/4 Baseline: cold_chain_temperature_excursion_rate (stabil, ~1.2%)..."
 for value in 1.1 1.3 1.2 1.1 1.3; do
-  post_observation "{\"metric\": \"cold_chain_temperature_excursion_rate\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"cold_chain_temperature_excursion_rate\", \"value\": $value}"
   sleep 3
 done
 
 echo "3/4 Zoll-Verzoegerung steigt deutlich an (Ursache)..."
-post_observation '{"metric": "customs_clearance_delay_hours", "value": 18.5}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"customs_clearance_delay_hours\", \"value\": 18.5}"
 sleep 8
 
 echo "4/4 Kuehlketten-Ueberschreitungsrate steigt an (Anomalie)..."
-post_observation '{"metric": "cold_chain_temperature_excursion_rate", "value": 9.7}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"cold_chain_temperature_excursion_rate\", \"value\": 9.7}"
 
 echo ""
 echo "Warte auf ${EXPECTED_INVESTIGATION_COUNT} Investigation-Ergebnisse (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -204,7 +222,7 @@ echo "    analysiert sind, ist die Sortierung zuverlaessig vollstaendig)"
 elapsed=0
 count=0
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  count=$(curl -s "$API_URL/investigations?limit=10" 2>/dev/null \
+  count=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=10" 2>/dev/null \
     | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
   if [ "$count" -ge "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
@@ -223,7 +241,7 @@ if [ "$count" -lt "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
   echo "Pruefe manuell: docker compose logs deviation-detector-service analyzer-service"
 fi
 
-result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
 if [ -z "$result" ] || [ "$result" = "[]" ]; then
   echo "Kein Investigation-Ergebnis gefunden."
