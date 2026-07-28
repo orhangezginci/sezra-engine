@@ -62,8 +62,10 @@ POSTGRES_USER = required_env("POSTGRES_USER")
 POSTGRES_PASSWORD = required_env("POSTGRES_PASSWORD")
 POSTGRES_DB = required_env("POSTGRES_DB")
 
-# Wie bei json-adapter-service: hart verdrahtet pro Adapter-Instanz, kein
-# dynamisches Projekt-Konzept.
+# Fallback-Workspace, falls eine Anfrage kein project_id-Feld mitschickt.
+# WICHTIG: muss selbst per POST /projects angelegt worden sein, sonst
+# lehnt ingest() jede Anfrage ab (siehe project_exists) - strikte
+# Pruefung, kein stillschweigendes Anlegen unbekannter Workspaces.
 SEZRA_PROJECT_ID = required_env("SEZRA_PROJECT_ID")
 
 
@@ -135,8 +137,34 @@ def publish_envelope(envelope: dict) -> None:
         connection.close()
 
 
+def project_exists(project_id: str) -> bool:
+    """
+    Strikte Pruefung, bewusst kein nachsichtiges Automatisch-Anlegen
+    unbekannter Workspaces - passt zum hyper-entkoppelten Grundprinzip
+    der Architektur: eine project_id muss explizit ueber POST /projects
+    entstanden sein, sonst existiert der Workspace fuer die Engine
+    schlicht nicht, egal wie plausibel der UUID-Wert aussieht.
+    """
+    connection = connect_to_postgres()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,))
+            return cursor.fetchone() is not None
+    finally:
+        connection.close()
+
+
 def ingest(raw_data: dict, source_type: str) -> dict:
     envelope = build_envelope(raw_data, source_type)
+
+    if not project_exists(envelope["project_id"]):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown project_id: {envelope['project_id']} - "
+                "create it first via POST /projects"
+            ),
+        )
 
     try:
         validate_envelope(envelope)

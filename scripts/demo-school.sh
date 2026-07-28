@@ -2,12 +2,13 @@
 set -e
 
 # Demo-Szenario: frueherer Unterrichtsbeginn -> Notenabfall in Periode 1.
-# Startet den kompletten Stack sauber neu (down -v + up --build), reicht
-# Rektor-Mail + Notenverlauf + Abfall per HTTP an api-service ein (kein
-# Datei-Drop mehr - das ist der Weg, den auch ein spaeteres Studio-
-# Frontend nehmen wuerde), wartet auf und zeigt das Investigation-
-# Ergebnis. Ein einziger Befehl, keine manuellen Docker-/curl-Kommandos
-# drumherum noetig.
+# Startet den kompletten Stack sauber neu (down -v + up --build), legt
+# einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service: jede project_id muss vorher darueber
+# angelegt worden sein, siehe Diskussion zur Workspace-Faehigkeit),
+# reicht Rektor-Mail + Notenverlauf + Abfall per HTTP an api-service ein,
+# wartet auf und zeigt das Investigation-Ergebnis. Ein einziger Befehl,
+# keine manuellen Docker-/curl-Kommandos drumherum noetig.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -157,6 +158,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: School - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -173,7 +191,7 @@ echo ""
 echo "1/3 Rektor-Mail (Kontext) wird per POST eingereicht..."
 curl -s -X POST "$API_URL/context" \
   -H "Content-Type: application/json" \
-  -d '{"sender": "rektor@schule.de", "subject": "Neuer Unterrichtsbeginn", "text": "Liebe Kolleginnen und Kollegen, ab naechster Woche wird der Unterrichtsbeginn von 7:30 auf 7:00 Uhr um eine halbe Stunde vorgezogen."}' \
+  -d "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"rektor@schule.de\", \"subject\": \"Neuer Unterrichtsbeginn\", \"text\": \"Liebe Kolleginnen und Kollegen, ab naechster Woche wird der Unterrichtsbeginn von 7:30 auf 7:00 Uhr um eine halbe Stunde vorgezogen.\"}" \
   > /dev/null
 sleep 5
 
@@ -181,7 +199,7 @@ echo "2/3 Baseline-Werte fuer math_test_average, Periode 1 werden per POST einge
 for value in 78 79 77 78 80; do
   curl -s -X POST "$API_URL/observations" \
     -H "Content-Type: application/json" \
-    -d "{\"metric\": \"math_test_average\", \"period\": 1, \"value\": $value}" \
+    -d "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"math_test_average\", \"period\": 1, \"value\": $value}" \
     > /dev/null
   sleep 3
 done
@@ -189,7 +207,7 @@ done
 echo "3/3 Notenabfall wird per POST eingereicht..."
 curl -s -X POST "$API_URL/observations" \
   -H "Content-Type: application/json" \
-  -d '{"metric": "math_test_average", "period": 1, "value": 45}' \
+  -d "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"math_test_average\", \"period\": 1, \"value\": 45}" \
   > /dev/null
 
 echo ""
@@ -198,7 +216,7 @@ echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
 elapsed=0
 result=""
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+  result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
   if [ -n "$result" ] && [ "$result" != "[]" ]; then
     break

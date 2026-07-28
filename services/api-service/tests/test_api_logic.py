@@ -97,8 +97,51 @@ class TestBuildEnvelope:
         assert raw_data == {"value": 1, "project_id": "kunde-a-lager"}
 
 
+class TestProjectExists:
+    def test_returns_true_when_project_found(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchone.return_value = (1,)
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        assert main.project_exists("some-uuid") is True
+
+    def test_returns_false_when_project_not_found(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchone.return_value = None
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        assert main.project_exists("unknown-uuid") is False
+
+    def test_queries_projects_table_by_id(self, monkeypatch):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchone.return_value = None
+        fake_cursor.__enter__ = lambda self: fake_cursor
+        fake_cursor.__exit__ = lambda self, *a: None
+
+        fake_connection = MagicMock()
+        fake_connection.cursor.return_value = fake_cursor
+        monkeypatch.setattr(main, "connect_to_postgres", lambda: fake_connection)
+
+        main.project_exists("some-uuid")
+
+        call_args = fake_cursor.execute.call_args
+        assert "FROM projects" in call_args[0][0]
+        assert "some-uuid" in call_args[0][1]
+
+
 class TestPostEndpoints:
     def test_post_observation_publishes_and_returns_event_id(self, monkeypatch):
+        monkeypatch.setattr(main, "project_exists", lambda project_id: True)
         fake_channel = MagicMock()
         fake_connection = MagicMock()
         fake_connection.channel.return_value = fake_channel
@@ -112,6 +155,7 @@ class TestPostEndpoints:
         fake_channel.basic_publish.assert_called_once()
 
     def test_post_context_publishes_and_returns_event_id(self, monkeypatch):
+        monkeypatch.setattr(main, "project_exists", lambda project_id: True)
         fake_channel = MagicMock()
         fake_connection = MagicMock()
         fake_connection.channel.return_value = fake_channel
@@ -124,6 +168,7 @@ class TestPostEndpoints:
         assert response.json()["event_type"] == "ContextIngested"
 
     def test_published_envelope_is_schema_valid(self, monkeypatch):
+        monkeypatch.setattr(main, "project_exists", lambda project_id: True)
         captured = {}
 
         def fake_publish(exchange, routing_key, body, properties=None):
@@ -142,6 +187,7 @@ class TestPostEndpoints:
         assert captured["envelope"]["payload"]["metric"] == "test"
 
     def test_rabbitmq_connection_is_closed_after_publish(self, monkeypatch):
+        monkeypatch.setattr(main, "project_exists", lambda project_id: True)
         fake_channel = MagicMock()
         fake_connection = MagicMock()
         fake_connection.channel.return_value = fake_channel
@@ -153,6 +199,7 @@ class TestPostEndpoints:
         fake_connection.close.assert_called_once()
 
     def test_post_observation_accepts_optional_project_id(self, monkeypatch):
+        monkeypatch.setattr(main, "project_exists", lambda project_id: True)
         captured = {}
 
         def fake_publish(exchange, routing_key, body, properties=None):
@@ -169,6 +216,48 @@ class TestPostEndpoints:
 
         assert captured["envelope"]["project_id"] == "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
         assert "project_id" not in captured["envelope"]["payload"]
+
+    def test_post_rejects_unknown_project_id(self, monkeypatch):
+        """
+        Der Kern der strikten Pruefung: eine syntaktisch gueltige, aber
+        nie ueber POST /projects angelegte project_id wird abgelehnt,
+        statt stillschweigend akzeptiert zu werden - passt zum hyper-
+        entkoppelten Architekturprinzip, keine impliziten Workspaces.
+        """
+        monkeypatch.setattr(main, "project_exists", lambda project_id: False)
+        fake_channel = MagicMock()
+        fake_connection = MagicMock()
+        fake_connection.channel.return_value = fake_channel
+        monkeypatch.setattr(main, "connect_to_rabbitmq", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.post(
+            "/observations",
+            json={"value": 1, "project_id": "99999999-9999-9999-9999-999999999999"},
+        )
+
+        assert response.status_code == 400
+        fake_channel.basic_publish.assert_not_called()
+
+    def test_post_uses_fallback_project_id_when_none_given(self, monkeypatch):
+        """
+        Ohne explizite project_id greift SEZRA_PROJECT_ID - dieser
+        Fallback-Wert unterliegt derselben strikten Pruefung, kein
+        impliziter Sonderfall.
+        """
+        checked = {}
+        monkeypatch.setattr(
+            main, "project_exists", lambda project_id: checked.setdefault("id", project_id) or True
+        )
+        fake_channel = MagicMock()
+        fake_connection = MagicMock()
+        fake_connection.channel.return_value = fake_channel
+        monkeypatch.setattr(main, "connect_to_rabbitmq", lambda: fake_connection)
+
+        client = TestClient(app)
+        client.post("/observations", json={"value": 1})
+
+        assert checked["id"] == "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
 
 
 class TestGetEndpoints:
