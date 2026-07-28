@@ -7,11 +7,11 @@ set -e
 # Domaenenagnostizitaet zusaetzlich zum bereits bewiesenen Metrik-zu-
 # Metrik-Fall (E-Commerce).
 #
-# Startet den kompletten Stack sauber (down + gezieltes Leeren von
-# Postgres/Qdrant, ollama-data bleibt erhalten), reicht die Deployment-
-# Benachrichtigung (Kontext) sowie Baseline- und Spike-Werte fuer
-# api_error_rate per HTTP ein, wartet auf und zeigt das Investigation-
-# Ergebnis.
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung), reicht die Deployment-Benachrichtigung
+# (Kontext) sowie Baseline- und Spike-Werte fuer api_error_rate per HTTP
+# ein, wartet auf und zeigt das Investigation-Ergebnis.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -147,6 +147,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: DevOps - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -169,17 +186,17 @@ post_context() {
 }
 
 echo "1/4 Deployment-Benachrichtigung (Kontext) wird eingereicht..."
-post_context '{"sender": "ci-cd@internal.tools", "subject": "Deployment v2.4.1", "text": "Version 2.4.1 wurde um 14:00 Uhr live geschaltet, enthaelt Aenderungen am Payment-Modul."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"ci-cd@internal.tools\", \"subject\": \"Deployment v2.4.1\", \"text\": \"Version 2.4.1 wurde um 14:00 Uhr live geschaltet, enthaelt Aenderungen am Payment-Modul.\"}"
 sleep 5
 
 echo "2/4 Baseline: api_error_rate (stabil, ~0.6%)..."
 for value in 0.5 0.7 0.6 0.8 0.6; do
-  post_observation "{\"metric\": \"api_error_rate\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"api_error_rate\", \"value\": $value}"
   sleep 3
 done
 
 echo "3/4 Fehlerrate-Spike (Anomalie)..."
-post_observation '{"metric": "api_error_rate", "value": 12.4}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"api_error_rate\", \"value\": 12.4}"
 
 echo ""
 echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -187,7 +204,7 @@ echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
 elapsed=0
 result=""
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+  result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
   if [ -n "$result" ] && [ "$result" != "[]" ]; then
     break
