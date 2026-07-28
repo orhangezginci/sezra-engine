@@ -7,11 +7,11 @@ set -e
 # conversion_rate) live end-to-end, im Gegensatz zum School-Szenario
 # (Metrik-zu-Text).
 #
-# Startet den kompletten Stack sauber (down + gezieltes Leeren von
-# Postgres/Qdrant, ollama-data bleibt erhalten), reicht Baseline-Werte
-# fuer beide Metriken sowie den Checkout-Fehler-Spike und den
-# Conversion-Rate-Abfall per HTTP ein, wartet auf und zeigt das
-# Investigation-Ergebnis.
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung), reicht Baseline-Werte fuer beide Metriken
+# sowie den Checkout-Fehler-Spike und den Conversion-Rate-Abfall per
+# HTTP ein, wartet auf und zeigt das Investigation-Ergebnis.
 #
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
@@ -155,6 +155,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: E-Commerce - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -172,22 +189,22 @@ post_observation() {
 
 echo "1/4 Baseline: checkout_error_rate (stabil, ~2%)..."
 for value in 2.1 1.9 2.0 2.2 1.8; do
-  post_observation "{\"metric\": \"checkout_error_rate\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"checkout_error_rate\", \"value\": $value}"
   sleep 3
 done
 
 echo "2/4 Baseline: conversion_rate (stabil, ~3.5%)..."
 for value in 3.4 3.6 3.5 3.4 3.6; do
-  post_observation "{\"metric\": \"conversion_rate\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"conversion_rate\", \"value\": $value}"
   sleep 3
 done
 
 echo "3/4 Checkout-Fehler-Spike (Ursache)..."
-post_observation '{"metric": "checkout_error_rate", "value": 27.5}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"checkout_error_rate\", \"value\": 27.5}"
 sleep 8
 
 echo "4/4 Conversion-Rate-Einbruch (Anomalie)..."
-post_observation '{"metric": "conversion_rate", "value": 1.1}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"conversion_rate\", \"value\": 1.1}"
 
 echo ""
 echo "Warte auf ${EXPECTED_INVESTIGATION_COUNT} Investigation-Ergebnisse (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -198,7 +215,7 @@ echo "    analysiert sind, ist die Sortierung zuverlaessig vollstaendig)"
 elapsed=0
 count=0
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  count=$(curl -s "$API_URL/investigations?limit=10" 2>/dev/null \
+  count=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=10" 2>/dev/null \
     | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
   if [ "$count" -ge "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
@@ -217,7 +234,7 @@ if [ "$count" -lt "$EXPECTED_INVESTIGATION_COUNT" ] 2>/dev/null; then
   echo "Pruefe manuell: docker compose logs deviation-detector-service analyzer-service"
 fi
 
-result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
 if [ -z "$result" ] || [ "$result" = "[]" ]; then
   echo "Kein Investigation-Ergebnis gefunden."
