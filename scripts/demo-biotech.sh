@@ -14,6 +14,10 @@ set -e
 # (Anomalie, faellt ab) <- Systemeintrag ueber den Lieferantenwechsel
 # (Ursache, aus einem PMS/Beschaffungssystem, nicht von einer Person).
 #
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung).
+#
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
 API_URL="http://localhost:8000"
@@ -147,6 +151,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: Biotech - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -169,17 +190,17 @@ post_context() {
 }
 
 echo "1/3 Lieferantenwechsel wird als Systemeintrag erfasst (Kontext)..."
-post_context '{"sender": "pms@lab.internal", "subject": "Lieferantenwechsel erfasst", "text": "Zellkulturmedium wechselt von Lieferant X (Artikel-Nr. 4471-A) zu Lieferant Y (Artikel-Nr. 8832-C), wirksam ab heute."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"pms@lab.internal\", \"subject\": \"Lieferantenwechsel erfasst\", \"text\": \"Zellkulturmedium wechselt von Lieferant X (Artikel-Nr. 4471-A) zu Lieferant Y (Artikel-Nr. 8832-C), wirksam ab heute.\"}"
 sleep 5
 
 echo "2/3 Baseline: cell_culture_viability_rate (stabil, ~92%)..."
 for value in 91 93 92 91 94; do
-  post_observation "{\"metric\": \"cell_culture_viability_rate\", \"value\": $value}"
+  post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"cell_culture_viability_rate\", \"value\": $value}"
   sleep 3
 done
 
 echo "3/3 Zellviabilitaet faellt ab (Anomalie)..."
-post_observation '{"metric": "cell_culture_viability_rate", "value": 58}'
+post_observation "{\"project_id\": \"$PROJECT_ID\", \"metric\": \"cell_culture_viability_rate\", \"value\": 58}"
 
 echo ""
 echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -187,7 +208,7 @@ echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
 elapsed=0
 result=""
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+  result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
   if [ -n "$result" ] && [ "$result" != "[]" ]; then
     break
