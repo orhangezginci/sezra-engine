@@ -6,9 +6,12 @@ set -e
 # deviation-detector-service (statistische Abweichung ueber Zeit).
 # Testet context-severity-detector-service.
 #
-# Reicht mehrere Kontext-Nachrichten unterschiedlicher Relevanz ein,
-# BEVOR die kritische Beschwerde kommt - realistischer Testkorpus statt
-# nur einer einzelnen, zufaellig passenden Alternative:
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung), reicht mehrere Kontext-Nachrichten
+# unterschiedlicher Relevanz ein, BEVOR die kritische Beschwerde kommt -
+# realistischer Testkorpus statt nur einer einzelnen, zufaellig
+# passenden Alternative:
 # - drei klar irrelevante Nachrichten (Rechnungsfrage, Feature-Wunsch,
 #   geringfuegige Beschwerde) - sollen NICHT als Ursache erscheinen
 # - eine echte, plausible Ursache (Wartungsankuendigung Auth-Server) -
@@ -158,6 +161,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: Severity - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -174,27 +194,27 @@ post_context() {
 }
 
 echo "1/6 Irrelevante Nachricht (Rechnungsfrage) wird eingereicht..."
-post_context '{"sender": "user3@example.com", "subject": "Rechnungsanfrage", "text": "Ich habe eine Frage zu meiner letzten Rechnung."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"user3@example.com\", \"subject\": \"Rechnungsanfrage\", \"text\": \"Ich habe eine Frage zu meiner letzten Rechnung.\"}"
 sleep 5
 
 echo "2/6 Irrelevante Nachricht (Feature-Wunsch) wird eingereicht..."
-post_context '{"sender": "user4@example.com", "subject": "Feature-Wunsch", "text": "Waere schoen, wenn es einen Dark Mode gaebe."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"user4@example.com\", \"subject\": \"Feature-Wunsch\", \"text\": \"Waere schoen, wenn es einen Dark Mode gaebe.\"}"
 sleep 5
 
 echo "3/6 Geringfuegige Beschwerde wird eingereicht (sollte NICHT als Ursache erscheinen)..."
-post_context '{"sender": "user1@example.com", "subject": "Feedback", "text": "Seitenaufbau teilweise langsam"}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"user1@example.com\", \"subject\": \"Feedback\", \"text\": \"Seitenaufbau teilweise langsam\"}"
 sleep 5
 
 echo "4/6 Echte, plausible Ursache wird eingereicht (Wartungsankuendigung)..."
-post_context '{"sender": "ops@internal.tools", "subject": "Wartungsankuendigung", "text": "Der Authentifizierungsserver wird heute von 14:00 bis 14:30 Uhr fuer Wartungsarbeiten kurzzeitig nicht erreichbar sein."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"ops@internal.tools\", \"subject\": \"Wartungsankuendigung\", \"text\": \"Der Authentifizierungsserver wird heute von 14:00 bis 14:30 Uhr fuer Wartungsarbeiten kurzzeitig nicht erreichbar sein.\"}"
 sleep 5
 
 echo "5/6 Weitere irrelevante Nachricht (positives Feedback) wird eingereicht..."
-post_context '{"sender": "user5@example.com", "subject": "Lob", "text": "Tolle neue Funktion, macht wirklich Spass zu nutzen!"}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"user5@example.com\", \"subject\": \"Lob\", \"text\": \"Tolle neue Funktion, macht wirklich Spass zu nutzen!\"}"
 sleep 8
 
 echo "6/6 Kritische Beschwerde wird eingereicht (sollte SOFORT eine Anomalie ausloesen)..."
-post_context '{"sender": "user2@example.com", "subject": "Login-Problem", "text": "Login nicht moeglich, Weiterleitung auf Fehlerseite"}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"user2@example.com\", \"subject\": \"Login-Problem\", \"text\": \"Login nicht moeglich, Weiterleitung auf Fehlerseite\"}"
 
 echo ""
 echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -202,7 +222,7 @@ echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
 elapsed=0
 result=""
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+  result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
   if [ -n "$result" ] && [ "$result" != "[]" ]; then
     break
