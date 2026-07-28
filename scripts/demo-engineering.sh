@@ -20,6 +20,10 @@ set -e
 # nur einer einzelnen, zufaellig passenden Alternative (siehe
 # demo-severity.sh fuer dieselbe Lehre im IT-Support-Kontext).
 #
+# Legt einen frischen, eindeutig benannten Workspace an (POST /projects,
+# strikte Pruefung in api-service - siehe demo-school.sh fuer die
+# ausfuehrliche Begruendung).
+#
 # Voraussetzung: im Repo-Root ausfuehren, curl muss lokal verfuegbar sein.
 
 API_URL="http://localhost:8000"
@@ -153,6 +157,23 @@ done
 echo "Stack ist bereit."
 echo ""
 
+echo "Neuen Workspace fuer diesen Demo-Lauf anlegen..."
+PROJECT_NAME="Demo: Engineering - $(date '+%Y-%m-%d %H:%M:%S')"
+PROJECT_RESPONSE=$(curl -s -X POST "$API_URL/projects" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"$PROJECT_NAME\"}")
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+if [ -z "$PROJECT_ID" ]; then
+  echo "Fehler: Workspace konnte nicht angelegt werden."
+  echo "Antwort: $PROJECT_RESPONSE"
+  exit 1
+fi
+
+echo "Workspace angelegt: $PROJECT_NAME"
+echo "  ID: $PROJECT_ID"
+echo ""
+
 echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
 docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
   -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
@@ -169,27 +190,27 @@ post_context() {
 }
 
 echo "1/6 Irrelevante Nachricht (defekte Beleuchtung) wird eingereicht..."
-post_context '{"sender": "facility-mgmt@site.internal", "subject": "Wartungsanfrage", "text": "Beleuchtung im Lager Sektor C ist seit gestern defekt, bitte Ersatz einplanen."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"facility-mgmt@site.internal\", \"subject\": \"Wartungsanfrage\", \"text\": \"Beleuchtung im Lager Sektor C ist seit gestern defekt, bitte Ersatz einplanen.\"}"
 sleep 5
 
 echo "2/6 Irrelevante Nachricht (Ersatzteil-Bestellung) wird eingereicht..."
-post_context '{"sender": "procurement@site.internal", "subject": "Bestellanfrage", "text": "Bitte Ersatzteile fuer Kran Nr. 4 nachbestellen, Lagerbestand niedrig."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"procurement@site.internal\", \"subject\": \"Bestellanfrage\", \"text\": \"Bitte Ersatzteile fuer Kran Nr. 4 nachbestellen, Lagerbestand niedrig.\"}"
 sleep 5
 
 echo "3/6 Geringfuegige Meldung (Kratzer am Gelaender) wird eingereicht..."
-post_context '{"sender": "site-inspection@site.internal", "subject": "Routineinspektion", "text": "Kleiner Kratzer am Handlauf im Treppenhaus B festgestellt, kosmetisch, keine Handlungsdringlichkeit."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"site-inspection@site.internal\", \"subject\": \"Routineinspektion\", \"text\": \"Kleiner Kratzer am Handlauf im Treppenhaus B festgestellt, kosmetisch, keine Handlungsdringlichkeit.\"}"
 sleep 5
 
 echo "4/6 Echte, plausible Ursache wird eingereicht (Vibrationsmessung)..."
-post_context '{"sender": "structural-monitoring@site.internal", "subject": "Vibrationsmessung ueberschritten", "text": "Erhoehte Vibrationswerte durch Bauarbeiten im angrenzenden Sektor A wurden ueber mehrere Tage in Sektor B gemessen, Grenzwert phasenweise ueberschritten."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"structural-monitoring@site.internal\", \"subject\": \"Vibrationsmessung ueberschritten\", \"text\": \"Erhoehte Vibrationswerte durch Bauarbeiten im angrenzenden Sektor A wurden ueber mehrere Tage in Sektor B gemessen, Grenzwert phasenweise ueberschritten.\"}"
 sleep 5
 
 echo "5/6 Weitere irrelevante Nachricht (Parkplatzanfrage) wird eingereicht..."
-post_context '{"sender": "hr@site.internal", "subject": "Parkplatzzuteilung", "text": "Neue Mitarbeiterin benoetigt einen Parkplatz auf dem Werksgelaende ab naechster Woche."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"hr@site.internal\", \"subject\": \"Parkplatzzuteilung\", \"text\": \"Neue Mitarbeiterin benoetigt einen Parkplatz auf dem Werksgelaende ab naechster Woche.\"}"
 sleep 8
 
 echo "6/6 Kritische Meldung wird eingereicht (sollte SOFORT eine Anomalie ausloesen)..."
-post_context '{"sender": "structural-monitoring@site.internal", "subject": "Strukturschaden festgestellt", "text": "Riss in tragendem Stahltraeger im Sektor B3 festgestellt, sofortige Ueberpruefung erforderlich."}'
+post_context "{\"project_id\": \"$PROJECT_ID\", \"sender\": \"structural-monitoring@site.internal\", \"subject\": \"Strukturschaden festgestellt\", \"text\": \"Riss in tragendem Stahltraeger im Sektor B3 festgestellt, sofortige Ueberpruefung erforderlich.\"}"
 
 echo ""
 echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
@@ -197,7 +218,7 @@ echo "Warte auf Investigation-Ergebnis (bis zu ${POLL_TIMEOUT_SECONDS}s)..."
 elapsed=0
 result=""
 while [ "$elapsed" -lt "$POLL_TIMEOUT_SECONDS" ]; do
-  result=$(curl -s "$API_URL/investigations?limit=1" 2>/dev/null || true)
+  result=$(curl -s "$API_URL/investigations?project_id=$PROJECT_ID&limit=1" 2>/dev/null || true)
 
   if [ -n "$result" ] && [ "$result" != "[]" ]; then
     break
