@@ -172,15 +172,6 @@ echo "Workspace angelegt: $PROJECT_NAME"
 echo "  ID: $PROJECT_ID"
 echo ""
 
-echo "Leere vorherige Demo-Daten (Postgres-Tabelle, Qdrant-Punkte)..."
-docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
-  -c "TRUNCATE TABLE events;" > /dev/null 2>&1 || true
-curl -s -X POST "http://localhost:6333/collections/sezra_semantic/points/delete" \
-  -H "Content-Type: application/json" \
-  -d '{"filter": {}}' > /dev/null 2>&1 || true
-
-echo ""
-
 post_observation() {
   curl -s -X POST "$API_URL/observations" \
     -H "Content-Type: application/json" \
