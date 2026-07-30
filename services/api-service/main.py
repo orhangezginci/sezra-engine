@@ -26,7 +26,7 @@ from uuid import uuid4
 import pika
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -202,6 +202,65 @@ def post_observation(raw_data: dict):
 @app.post("/context")
 def post_context(raw_data: dict):
     return ingest(raw_data, "context")
+
+
+def validate_batch_entry(entry) -> str | None:
+    """Gibt eine Fehlermeldung zurueck, oder None wenn der Eintrag gueltig ist."""
+    if not isinstance(entry, dict):
+        return "kein gueltiges JSON-Objekt"
+    if entry.get("source_type") not in SOURCE_TYPE_TO_EVENT_TYPE:
+        return '"source_type" fehlt oder ist ungueltig (muss "observation" oder "context" sein)'
+    return None
+
+
+@app.post("/ingest/batch")
+def post_batch(raw_data: list = Body(...)):
+    """
+    Nimmt ein JSON-Array mehrerer Eintraege entgegen (z. B. eine
+    exportierte Server-Log-Datei mit vielen Zeilen) und verteilt jeden
+    einzeln an die gleiche Logik wie POST /observations bzw.
+    POST /context - intern in der Engine, NICHT als mehrere HTTP-
+    Anfragen von einem Client aus.
+
+    Bewusst hier gebaut, nicht in Studio: ein Client soll niemals selbst
+    entscheiden oder in einer Schleife aufrufen muessen, welcher Eintrag
+    wohin gehoert - das waere Geschaeftslogik im Frontend, ueber curl
+    direkt nicht reproduzierbar. json-adapter-service lehnt Arrays
+    bewusst ab (eine Datei = ein Objekt, siehe dortiger Kommentar) -
+    dieser Endpunkt ist die dedizierte, saubere Antwort auf "eine Datei
+    = mehrere Eintraege", ohne json-adapter-service selbst aufzuweichen.
+
+    Ein nicht-Array-Koerper wird bereits von FastAPI selbst mit 422
+    abgelehnt (durch die list-Typannotation), bevor diese Funktion
+    ueberhaupt laeuft - keine manuelle Pruefung noetig.
+
+    Liefert pro Eintrag ein eigenes Ergebnis zurueck (Erfolg mit
+    event_id, oder Fehlschlag mit Grund) - ein einzelner ungueltiger
+    Eintrag blockiert nicht die anderen, aehnlich wie einzelne
+    fehlerhafte Nachrichten in der eigentlichen Pipeline per Dead-
+    Letter-Queue isoliert werden, statt die gesamte Verarbeitung zu
+    stoppen.
+    """
+    results = []
+    for index, entry in enumerate(raw_data):
+        error = validate_batch_entry(entry)
+        if error:
+            results.append({"index": index, "ok": False, "error": error})
+            continue
+
+        source_type = entry["source_type"]
+        try:
+            outcome = ingest(entry, source_type)
+            results.append({
+                "index": index,
+                "ok": True,
+                "event_id": outcome["event_id"],
+                "event_type": outcome["event_type"],
+            })
+        except HTTPException as error:
+            results.append({"index": index, "ok": False, "error": error.detail})
+
+    return {"results": results}
 
 
 @app.get("/investigations")

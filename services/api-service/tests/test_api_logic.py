@@ -28,7 +28,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
-from main import app, build_envelope  # noqa: E402
+from main import app, build_envelope, validate_batch_entry  # noqa: E402
 
 
 class TestBuildEnvelope:
@@ -258,6 +258,120 @@ class TestPostEndpoints:
         client.post("/observations", json={"value": 1})
 
         assert checked["id"] == "1a2b3c4d-5e6f-4a3a-9c1a-2b1a4e3a4a3a"
+
+
+class TestValidateBatchEntry:
+    def test_valid_observation_entry(self):
+        assert validate_batch_entry({"source_type": "observation", "value": 1}) is None
+
+    def test_valid_context_entry(self):
+        assert validate_batch_entry({"source_type": "context", "text": "..."}) is None
+
+    def test_non_dict_entry_is_invalid(self):
+        assert validate_batch_entry("not a dict") is not None
+        assert validate_batch_entry([1, 2, 3]) is not None
+
+    def test_missing_source_type_is_invalid(self):
+        assert validate_batch_entry({"value": 1}) is not None
+
+    def test_unknown_source_type_is_invalid(self):
+        assert validate_batch_entry({"source_type": "unknown", "value": 1}) is not None
+
+
+class TestBatchIngest:
+    def test_rejects_non_array_body(self):
+        """
+        Wird bereits von FastAPI selbst durch die list-Typannotation
+        abgelehnt (422), bevor post_batch() ueberhaupt laeuft - keine
+        eigene Pruefung noetig oder vorhanden.
+        """
+        client = TestClient(app)
+        response = client.post("/ingest/batch", json={"not": "an array"})
+
+        assert response.status_code == 422
+
+    def test_processes_multiple_valid_entries(self, monkeypatch):
+        """
+        Der Kern der strikten Trennung: Studio (oder jeder andere
+        Client) schickt die komplette Datei in EINEM Aufruf - die
+        Engine selbst zerlegt, validiert und verteilt jeden Eintrag,
+        kein Client-seitiges Schleifen ueber einzelne HTTP-Aufrufe.
+        """
+        monkeypatch.setattr(main, "project_exists", lambda project_id: True)
+        fake_channel = MagicMock()
+        fake_connection = MagicMock()
+        fake_connection.channel.return_value = fake_channel
+        monkeypatch.setattr(main, "connect_to_rabbitmq", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.post(
+            "/ingest/batch",
+            json=[
+                {"source_type": "observation", "metric": "x", "value": 1},
+                {"source_type": "context", "sender": "a@b.de", "text": "..."},
+            ],
+        )
+
+        assert response.status_code == 200
+        results = response.json()["results"]
+        assert len(results) == 2
+        assert all(r["ok"] for r in results)
+        assert results[0]["event_type"] == "ObservationIngested"
+        assert results[1]["event_type"] == "ContextIngested"
+
+    def test_invalid_entry_does_not_block_others(self, monkeypatch):
+        """
+        Ein einzelner ungueltiger Eintrag (fehlendes source_type) darf
+        nicht die Verarbeitung der uebrigen, gueltigen Eintraege
+        verhindern - analog zur Dead-Letter-Isolierung in der
+        eigentlichen Pipeline.
+        """
+        monkeypatch.setattr(main, "project_exists", lambda project_id: True)
+        fake_channel = MagicMock()
+        fake_connection = MagicMock()
+        fake_connection.channel.return_value = fake_channel
+        monkeypatch.setattr(main, "connect_to_rabbitmq", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.post(
+            "/ingest/batch",
+            json=[
+                {"source_type": "observation", "value": 1},
+                {"value": 2},  # fehlt source_type
+                {"source_type": "context", "text": "..."},
+            ],
+        )
+
+        results = response.json()["results"]
+        assert results[0]["ok"] is True
+        assert results[1]["ok"] is False
+        assert "source_type" in results[1]["error"]
+        assert results[2]["ok"] is True
+
+    def test_ingest_failure_reported_per_entry_not_whole_batch(self, monkeypatch):
+        """
+        Ein Fehlschlag in ingest() selbst (z. B. unbekannte project_id)
+        wird als Fehler FUER DIESEN Eintrag zurueckgegeben, nicht als
+        Fehlschlag der gesamten Anfrage (kein 400/500 fuer den ganzen
+        Batch, nur weil ein Eintrag scheitert).
+        """
+        monkeypatch.setattr(main, "project_exists", lambda project_id: False)
+        fake_channel = MagicMock()
+        fake_connection = MagicMock()
+        fake_connection.channel.return_value = fake_channel
+        monkeypatch.setattr(main, "connect_to_rabbitmq", lambda: fake_connection)
+
+        client = TestClient(app)
+        response = client.post(
+            "/ingest/batch",
+            json=[{"source_type": "observation", "value": 1}],
+        )
+
+        assert response.status_code == 200  # die Batch-Anfrage selbst war gueltig
+        results = response.json()["results"]
+        assert results[0]["ok"] is False
+        assert "project_id" in results[0]["error"].lower() or "Unknown" in results[0]["error"]
+        fake_channel.basic_publish.assert_not_called()
 
 
 class TestGetEndpoints:
